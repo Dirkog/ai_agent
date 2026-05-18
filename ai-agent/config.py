@@ -1,69 +1,81 @@
-"""Configuration for AI Agent"""
+"""AI Agent Configuration — v5 with Orchestrator support"""
 import os
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Dict, Optional
 from dotenv import load_dotenv
 
-# Load .env file if exists
 load_dotenv()
-
 
 @dataclass
 class ProviderConfig:
     name: str
     base_url: str
-    api_key: Optional[str] = None
-    model: str = ""
-    timeout: int = 60
-    max_retries: int = 3
-    priority: int = 1  # Lower = higher priority
-    rate_limit_rpm: int = 60
-
+    api_key: Optional[str]
+    model: str
+    priority: int
+    rate_limit_rpm: int
+    is_free: bool = True  # NVIDIA NIM бесплатный
 
 @dataclass
 class AgentConfig:
-    # Providers in priority order
+    max_iterations: int = 50
+    working_directory: str = field(default_factory=lambda: os.getenv("WORKING_DIRECTORY", "."))
+    auto_validate: bool = True
+    auto_checkpoint: bool = True
+    context_window: int = 200000  # tokens
+
+    # Orchestrator settings
+    orchestrator_brain: str = "nvidia/llama-3.1-nemotron-70b-instruct"
+    debugger_model: str = "anthropic/claude-3.5-sonnet"
+    default_rpm_limit: int = 40
+
+    # Providers
     providers: List[ProviderConfig] = field(default_factory=lambda: [
-        ProviderConfig(
-            name="openrouter",
-            base_url="https://openrouter.ai/api/v1",
-            api_key=os.getenv("OPENROUTER_API_KEY"),
-            model="anthropic/claude-3.5-sonnet",
-            priority=1,
-            rate_limit_rpm=20
-        ),
         ProviderConfig(
             name="nvidia_nim",
             base_url="https://integrate.api.nvidia.com/v1",
             api_key=os.getenv("NVIDIA_API_KEY"),
-            model="nvidia/llama-3.1-nemotron-70b-instruct",
+            model=os.getenv("NVIDIA_MODEL", "nvidia/llama-3.1-nemotron-70b-instruct"),
+            priority=1,
+            rate_limit_rpm=40,
+            is_free=True
+        ),
+        ProviderConfig(
+            name="openrouter",
+            base_url="https://openrouter.ai/api/v1",
+            api_key=os.getenv("OPENROUTER_API_KEY"),
+            model=os.getenv("OPENROUTER_MODEL", "anthropic/claude-3.5-sonnet"),
             priority=2,
-            rate_limit_rpm=30
+            rate_limit_rpm=20,
+            is_free=False
         ),
         ProviderConfig(
             name="ollama",
-            base_url="http://localhost:11434/v1",
-            api_key="ollama",  # Not used but required for OpenAI client
-            model="codellama:34b",
+            base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
+            api_key="ollama",
+            model=os.getenv("OLLAMA_MODEL", "codellama:34b"),
             priority=3,
-            rate_limit_rpm=9999
+            rate_limit_rpm=9999,
+            is_free=True
         ),
     ])
 
-    # Agent settings
-    max_iterations: int = 50
-    auto_confirm: bool = False  # True = autonomous mode
-    working_directory: str = os.getcwd()
+    # Security levels
+    security_levels: Dict[str, str] = field(default_factory=lambda: {
+        "read_file": "low",
+        "write_file": "medium",
+        "execute_command": "high",
+        "git_rollback": "critical",
+    })
 
-    # Rate limiting
-    default_retry_delay: int = 60
-    max_retry_delay: int = 3600
-    exponential_base: float = 2.0
+    # LSP
+    lsp_command: str = "pylsp"
 
-    # Validation
-    run_tests: bool = True
-    run_linter: bool = True
-    check_syntax: bool = True
+    # Vector store
+    vector_db_path: str = ".ai-agent/vector_db"
 
+    # Session memory
+    memory_path: str = ".ai-agent/memory"
 
+# Global config instance
 CONFIG = AgentConfig()

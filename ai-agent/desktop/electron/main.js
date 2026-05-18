@@ -20,8 +20,6 @@ function createWindow() {
         show: false
     });
 
-    // Production: load from localhost
-    // Development: load from dev server
     const isDev = process.env.NODE_ENV === 'development';
     if (isDev) {
         mainWindow.loadURL('http://localhost:3000');
@@ -29,7 +27,7 @@ function createWindow() {
     } else {
         mainWindow.loadURL('http://localhost:5000');
     }
-    
+
     mainWindow.once('ready-to-show', () => {
         mainWindow.show();
     });
@@ -43,7 +41,7 @@ function createWindow() {
 function startPythonBackend() {
     const pythonPath = process.env.PYTHON_PATH || 'python';
     const scriptPath = path.join(__dirname, '..', '..', 'web', 'app.py');
-    
+
     pythonProcess = spawn(pythonPath, [scriptPath], {
         env: { 
             ...process.env, 
@@ -51,21 +49,20 @@ function startPythonBackend() {
             PORT: '5000'
         }
     });
-    
+
     pythonProcess.stdout.on('data', (data) => {
         console.log(`[Python] ${data}`);
     });
-    
+
     pythonProcess.stderr.on('data', (data) => {
         console.error(`[Python Error] ${data}`);
     });
-    
+
     pythonProcess.on('close', (code) => {
         console.log(`Python process exited with code ${code}`);
     });
 }
 
-// IPC handlers
 ipcMain.handle('select-folder', async () => {
     const result = await dialog.showOpenDialog(mainWindow, {
         properties: ['openDirectory'],
@@ -87,7 +84,6 @@ ipcMain.handle('get-app-version', () => {
     return app.getVersion();
 });
 
-// Menu template
 const menuTemplate = [
     {
         label: 'File',
@@ -130,7 +126,7 @@ Menu.setApplicationMenu(menu);
 app.whenReady().then(() => {
     startPythonBackend();
     setTimeout(createWindow, 2000);
-    
+
     app.on('activate', () => {
         if (BrowserWindow.getAllWindows().length === 0) createWindow();
     });

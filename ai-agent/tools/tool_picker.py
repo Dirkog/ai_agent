@@ -58,14 +58,14 @@ TOOL_CATEGORIES = [
 
 class ToolPicker:
     """Selects relevant tools based on task description"""
-    
+
     def __init__(self, all_tools: Dict[str, Any]):
         self.all_tools = all_tools
-    
+
     def pick_tools(self, task: str, max_tools: int = 15) -> Dict[str, Any]:
         """Select most relevant tools for the task"""
         task_lower = task.lower()
-        
+
         category_scores = {}
         for cat in TOOL_CATEGORIES:
             score = 0
@@ -73,30 +73,30 @@ class ToolPicker:
                 if keyword in task_lower:
                     score += 1
             category_scores[cat.name] = score
-        
+
         selected_tools = set(TOOL_CATEGORIES[0].tools)
-        
+
         for cat in TOOL_CATEGORIES[1:]:
             if category_scores[cat.name] > 0:
                 selected_tools.update(cat.tools)
-        
+
         if len(selected_tools) < 6:
             selected_tools.update(TOOL_CATEGORIES[1].tools)
             selected_tools.update(TOOL_CATEGORIES[2].tools)
-        
+
         selected = {}
         for tool_name in list(selected_tools)[:max_tools]:
             if tool_name in self.all_tools:
                 selected[tool_name] = self.all_tools[tool_name]
-        
+
         return selected
-    
+
     def get_system_prompt_tools_section(self, task: str) -> str:
         """Generate tools section for system prompt"""
         selected = self.pick_tools(task)
-        
+
         lines = []
         for tool_name, tool in selected.items():
             lines.append(f"- {tool_name}: {tool.description}")
-        
+
         return "\n".join(lines)
