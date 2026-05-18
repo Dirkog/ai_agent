@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  ai-agent:
+    build: .
+    ports:
+      - "5000:5000"
+    environment:
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - NVIDIA_API_KEY=${NVIDIA_API_KEY}
+    volumes:
+      - ./projects:/app/projects
+      - ./logs:/app/logs
+    command: python main.py --web
+    restart: unless-stopped
+
+  # Optional: Ollama for local models
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    restart: unless-stopped
+    profiles:
+      - local
+
+volumes:
+  ollama-data:
