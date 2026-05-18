@@ -9,12 +9,10 @@ import os
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Callable
 from dataclasses import dataclass
-from urllib.parse import urljoin
-from urllib.request import pathname2url
 
 @dataclass
 class LSPDiagnostic:
-    severity: int  # 1=Error, 2=Warning, 3=Info, 4=Hint
+    severity: int
     message: str
     line: int
     column: int
@@ -50,7 +48,6 @@ class LSPClient:
         self._callbacks: List[Callable] = []
 
     def start(self) -> bool:
-        """Start LSP server process"""
         try:
             self.process = subprocess.Popen(
                 [self.command] + self.args,
@@ -66,7 +63,6 @@ class LSPClient:
             self._reader_thread.start()
 
             root_uri = _path_to_uri(self.project_path)
-            
             init_id = self._next_id()
             self._send({
                 "jsonrpc": "2.0",
@@ -90,7 +86,7 @@ class LSPClient:
             init_queue = queue.Queue()
             with self._lock:
                 self._pending[init_id] = init_queue
-            
+
             try:
                 response = init_queue.get(timeout=10)
                 if "result" in response:
@@ -129,7 +125,6 @@ class LSPClient:
                 self._running = False
 
     def _read_loop(self):
-        """Read LSP messages from stdout"""
         while self._running and self.process and self.process.poll() is None:
             try:
                 header = ""
@@ -164,7 +159,6 @@ class LSPClient:
                     print(f"[LSP] Read error: {e}")
 
     def _handle_message(self, message: dict):
-        """Handle incoming LSP message"""
         msg_id = message.get("id")
 
         if msg_id is not None:
@@ -181,7 +175,7 @@ class LSPClient:
             path = uri.replace("file://", "")
             if os.name == 'nt':
                 path = path.lstrip('/')
-            
+
             self._diagnostics[path] = [
                 LSPDiagnostic(
                     severity=d.get("severity", 1),
@@ -193,7 +187,7 @@ class LSPClient:
                 )
                 for d in diagnostics
             ]
-            
+
             for cb in self._callbacks:
                 try:
                     cb(path, self._diagnostics[path])
@@ -201,10 +195,8 @@ class LSPClient:
                     pass
 
     def open_document(self, path: str, content: str = ""):
-        """Notify LSP that document is open"""
         full_path = self.project_path / path
         uri = _path_to_uri(full_path)
-        
         self._send({
             "jsonrpc": "2.0",
             "method": "textDocument/didOpen",
@@ -219,33 +211,26 @@ class LSPClient:
         })
 
     def change_document(self, path: str, content: str):
-        """Notify LSP that document changed"""
         full_path = self.project_path / path
         uri = _path_to_uri(full_path)
-        
         self._send({
             "jsonrpc": "2.0",
             "method": "textDocument/didChange",
             "params": {
-                "textDocument": {
-                    "uri": uri,
-                    "version": 2
-                },
+                "textDocument": {"uri": uri, "version": 2},
                 "contentChanges": [{"text": content}]
             }
         })
 
     def hover(self, path: str, line: int, column: int) -> Optional[str]:
-        """Get hover information at position"""
         msg_id = self._next_id()
         response_queue = queue.Queue()
-        
         with self._lock:
             self._pending[msg_id] = response_queue
 
         full_path = self.project_path / path
         uri = _path_to_uri(full_path)
-        
+
         self._send({
             "jsonrpc": "2.0",
             "id": msg_id,
@@ -261,7 +246,6 @@ class LSPClient:
             result = response.get("result", {})
             if not result:
                 return None
-            
             contents = result.get("contents", "")
             if isinstance(contents, dict):
                 return contents.get("value", "")
@@ -275,16 +259,14 @@ class LSPClient:
                 self._pending.pop(msg_id, None)
 
     def goto_definition(self, path: str, line: int, column: int) -> List[LSPLocation]:
-        """Find definition of symbol at position"""
         msg_id = self._next_id()
         response_queue = queue.Queue()
-        
         with self._lock:
             self._pending[msg_id] = response_queue
 
         full_path = self.project_path / path
         uri = _path_to_uri(full_path)
-        
+
         self._send({
             "jsonrpc": "2.0",
             "id": msg_id,
@@ -309,10 +291,8 @@ class LSPClient:
                 path_str = uri.replace("file://", "")
                 if os.name == 'nt':
                     path_str = path_str.lstrip('/')
-                
                 range_data = r.get("range", {})
                 start = range_data.get("start", {})
-                
                 locations.append(LSPLocation(
                     path=path_str,
                     line=start.get("line", 0),
@@ -326,23 +306,19 @@ class LSPClient:
                 self._pending.pop(msg_id, None)
 
     def get_symbols(self, path: str) -> List[Dict[str, Any]]:
-        """Get document symbols (functions, classes, variables)"""
         msg_id = self._next_id()
         response_queue = queue.Queue()
-        
         with self._lock:
             self._pending[msg_id] = response_queue
 
         full_path = self.project_path / path
         uri = _path_to_uri(full_path)
-        
+
         self._send({
             "jsonrpc": "2.0",
             "id": msg_id,
             "method": "textDocument/documentSymbol",
-            "params": {
-                "textDocument": {"uri": uri}
-            }
+            "params": {"textDocument": {"uri": uri}}
         })
 
         try:
@@ -355,16 +331,13 @@ class LSPClient:
                 self._pending.pop(msg_id, None)
 
     def get_diagnostics(self, path: str) -> List[LSPDiagnostic]:
-        """Get diagnostics for a file"""
         full_path = str(self.project_path / path)
         return self._diagnostics.get(full_path, [])
 
     def add_diagnostics_callback(self, callback: Callable):
-        """Add callback for diagnostics updates"""
         self._callbacks.append(callback)
 
     def stop(self):
-        """Shutdown LSP server"""
         self._running = False
         if self.process:
             try:

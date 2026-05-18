@@ -73,7 +73,7 @@ def get_project():
                 except PermissionError:
                     pass
             return result
-        
+
         return jsonify(build_tree(root))
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -84,18 +84,18 @@ def get_file():
     path = request.args.get('path', '')
     if not path:
         return jsonify({"error": "No path provided"}), 400
-    
+
     try:
         full_path = Path(CONFIG.working_directory) / path
         full_path = full_path.resolve()
         root = Path(CONFIG.working_directory).resolve()
-        
+
         if not str(full_path).startswith(str(root)):
             return jsonify({"error": "Access denied"}), 403
-        
+
         if not full_path.exists():
             return jsonify({"error": "File not found"}), 404
-        
+
         content = full_path.read_text(encoding='utf-8', errors='replace')
         return jsonify({
             "path": path,
@@ -113,21 +113,21 @@ def save_file():
     data = request.json
     path = data.get('path', '')
     content = data.get('content', '')
-    
+
     if not path:
         return jsonify({"error": "No path provided"}), 400
-    
+
     try:
         full_path = Path(CONFIG.working_directory) / path
         full_path = full_path.resolve()
         root = Path(CONFIG.working_directory).resolve()
-        
+
         if not str(full_path).startswith(str(root)):
             return jsonify({"error": "Access denied"}), 403
-        
+
         full_path.parent.mkdir(parents=True, exist_ok=True)
         full_path.write_text(content, encoding='utf-8')
-        
+
         return jsonify({"success": True, "path": path})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -138,21 +138,21 @@ def delete_file():
     path = request.args.get('path', '')
     if not path:
         return jsonify({"error": "No path provided"}), 400
-    
+
     try:
         full_path = Path(CONFIG.working_directory) / path
         full_path = full_path.resolve()
         root = Path(CONFIG.working_directory).resolve()
-        
+
         if not str(full_path).startswith(str(root)):
             return jsonify({"error": "Access denied"}), 403
-        
+
         if full_path.is_file():
             full_path.unlink()
         elif full_path.is_dir():
             import shutil
             shutil.rmtree(full_path)
-        
+
         return jsonify({"success": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -162,21 +162,21 @@ def search_files():
     """Search in files"""
     query = request.args.get('q', '')
     path = request.args.get('path', '.')
-    
+
     if not query:
         return jsonify({"results": []})
-    
+
     try:
         import re
         base = Path(CONFIG.working_directory) / path
         results = []
-        
+
         for file_path in base.rglob('*'):
             if not file_path.is_file():
                 continue
             if file_path.name.startswith('.'):
                 continue
-            
+
             try:
                 with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                     for i, line in enumerate(f, 1):
@@ -189,10 +189,10 @@ def search_files():
                             })
             except Exception:
                 continue
-            
+
             if len(results) >= 100:
                 break
-        
+
         return jsonify({"results": results, "total": len(results)})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -234,32 +234,32 @@ def handle_start_task(data):
     sid = request.sid
     task = data.get('task', '')
     mode = data.get('mode', 'interactive')
-    
+
     if not task:
         emit('error', {'message': 'No task provided'})
         return
-    
+
     session = sessions.get(sid)
     if not session:
         emit('error', {'message': 'No session'})
         return
-    
+
     if session.get('thread') and session['thread'].is_alive():
         session['stop_requested'] = True
         time.sleep(0.5)
-    
+
     session['stop_requested'] = False
     session['mode'] = mode
-    
+
     try:
         agent = Agent(mode=mode)
         sessions[sid]['agent'] = agent
     except Exception as e:
         emit('error', {'message': f'Failed to create agent: {str(e)}'})
         return
-    
+
     emit('status', {'message': f'Starting task in {mode} mode...'})
-    
+
     def run_agent():
         try:
             full_response = []
@@ -267,22 +267,22 @@ def handle_start_task(data):
                 if session.get('stop_requested'):
                     emit('chunk', {'content': '\n\n[STOPPED BY USER]\n'}, room=sid)
                     break
-                
+
                 emit('chunk', {'content': chunk}, room=sid)
                 full_response.append(chunk)
                 time.sleep(0.01)
-            
+
             if not session.get('stop_requested'):
                 emit('complete', {
                     'message': 'Task completed',
                     'full_response': ''.join(full_response)
                 }, room=sid)
-            
+
         except Exception as e:
             emit('error', {'message': str(e)}, room=sid)
         finally:
             session['thread'] = None
-    
+
     thread = threading.Thread(target=run_agent)
     thread.daemon = True
     session['thread'] = thread
@@ -300,7 +300,7 @@ def handle_stop_task():
 def handle_user_input(data):
     sid = request.sid
     user_input = data.get('input', '')
-    
+
     session = sessions.get(sid)
     if session and session.get('agent'):
         emit('status', {'message': f'User input received: {user_input}'})
@@ -311,7 +311,7 @@ def handle_user_input(data):
 def handle_chat(data):
     sid = request.sid
     message = data.get('message', '')
-    
+
     session = sessions.get(sid)
     if not session or not session.get('agent'):
         try:
@@ -321,9 +321,9 @@ def handle_chat(data):
         except Exception as e:
             emit('error', {'message': f'Failed to create agent: {str(e)}'})
             return
-    
+
     agent = sessions[sid]['agent']
-    
+
     def run_chat():
         try:
             full_response = []
@@ -333,11 +333,11 @@ def handle_chat(data):
                 emit('chunk', {'content': chunk}, room=sid)
                 full_response.append(chunk)
                 time.sleep(0.01)
-            
+
             emit('message_complete', {'content': ''.join(full_response)}, room=sid)
         except Exception as e:
             emit('error', {'message': str(e)}, room=sid)
-    
+
     thread = threading.Thread(target=run_chat)
     thread.daemon = True
     thread.start()
