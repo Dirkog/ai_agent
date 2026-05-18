@@ -1,4 +1,4 @@
-"""Tools package"""
+"""Tools package — Cursor/Claude Code compatible"""
 from .base import BaseTool, ToolResult
 from .file_tools import ReadFileTool, WriteFileTool, ListFilesTool, SearchFilesTool
 from .shell_tools import ShellTool, PythonTool
@@ -15,6 +15,10 @@ from .ide.ide_tools import (
 from .ai.ai_tools import (
     ExplainCodeTool, GenerateTestsTool, GenerateDocsTool, SmartImportTool
 )
+from .cursor_tools import (
+    WebSearchTool, FetchDocsTool, NotepadTool, GitDiffTool,
+    ChromeAutomationTool, BackgroundTaskTool, CodeInstructionsTool
+)
 
 __all__ = [
     'BaseTool', 'ToolResult',
@@ -27,4 +31,7 @@ __all__ = [
     'BreadcrumbsTool', 'OutlineTool', 'FindReferencesTool',
     'RenameSymbolTool', 'MinimapTool', 'QuickFixTool',
     'ExplainCodeTool', 'GenerateTestsTool', 'GenerateDocsTool', 'SmartImportTool',
+    # Cursor/Claude Code tools
+    'WebSearchTool', 'FetchDocsTool', 'NotepadTool', 'GitDiffTool',
+    'ChromeAutomationTool', 'BackgroundTaskTool', 'CodeInstructionsTool',
 ]

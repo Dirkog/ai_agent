@@ -1,6 +1,6 @@
-"""AI Agent Orchestrator v2 — Smart Model Router
-Главный оркестратор (NVIDIA NIM) назначает бесплатные модели ролям.
-OpenRouter использует ТОЛЬКО бесплатные модели для дебаггера.
+"""AI Agent Orchestrator v3 — Autonomous Model Selection
+Главный оркестратор САМ выбирает бесплатные NVIDIA модели под задачу.
+Не ждёт model_assignments от LLM — принимает решение сам на основе анализа.
 """
 import json
 import os
@@ -32,17 +32,15 @@ class AgentRole(Enum):
     OPTIMIZER = "optimizer"
 
 
-# NVIDIA NIM — ВСЕ модели БЕСПЛАТНЫЕ (80+ models, 40 RPM, no credit card)
-NVIDIA_FREE_MODELS = {
-    # Reasoning / Complex logic
+# NVIDIA NIM — ВСЕ модели БЕСПЛАТНЫЕ
+NVIDIA_MODELS = {
     "deepseek-r1": {
         "id": "deepseek/deepseek-r1-0528",
         "description": "DeepSeek R1 — лучшая для reasoning, математики, алгоритмов",
-        "strengths": ["reasoning", "math", "algorithms", "complex_logic", "planning"],
+        "strengths": ["reasoning", "math", "algorithms", "complex_logic", "planning", "debugging"],
         "rpm": 40,
         "context": 128000
     },
-    # Coding specialist
     "qwen3-coder": {
         "id": "qwen/qwen3-235b-a22b",
         "description": "Qwen3 235B — специализированная для кодинга, архитектуры",
@@ -50,7 +48,6 @@ NVIDIA_FREE_MODELS = {
         "rpm": 40,
         "context": 128000
     },
-    # General purpose / large context
     "kimi-2-5": {
         "id": "moonshotai/kimi-2.5",
         "description": "Kimi 2.5 — огромный контекст, лучшая для анализа больших файлов",
@@ -58,7 +55,6 @@ NVIDIA_FREE_MODELS = {
         "rpm": 40,
         "context": 256000
     },
-    # Multilingual / general
     "glm-5-1": {
         "id": "zhipuai/glm-5.1",
         "description": "GLM 5.1 — мультиязычная, хороша для документации и комментариев",
@@ -66,7 +62,6 @@ NVIDIA_FREE_MODELS = {
         "rpm": 40,
         "context": 128000
     },
-    # Vision / multimodal
     "nemotron-vision": {
         "id": "nvidia/nemotron-nano-12b-v2-vl",
         "description": "Nemotron Nano VL — vision-language, анализ UI/скриншотов",
@@ -74,7 +69,6 @@ NVIDIA_FREE_MODELS = {
         "rpm": 40,
         "context": 32000
     },
-    # Fast / lightweight
     "gpt-oss-120b": {
         "id": "openai/gpt-oss-120b",
         "description": "GPT-OSS-120B — быстрая, для простых задач и quick fixes",
@@ -82,7 +76,6 @@ NVIDIA_FREE_MODELS = {
         "rpm": 40,
         "context": 128000
     },
-    # Indic / specialized
     "sarvam-m": {
         "id": "sarvam/sarvam-m",
         "description": "Sarvam-M — для индийских языков и специализированных задач",
@@ -90,7 +83,6 @@ NVIDIA_FREE_MODELS = {
         "rpm": 40,
         "context": 128000
     },
-    # Nemotron (original)
     "nemotron-70b": {
         "id": "nvidia/llama-3.1-nemotron-70b-instruct",
         "description": "Nemotron 70B — универсальная, хороший баланс скорости/качества",
@@ -98,7 +90,6 @@ NVIDIA_FREE_MODELS = {
         "rpm": 40,
         "context": 128000
     },
-    # DeepSeek Coder
     "deepseek-coder": {
         "id": "deepseek-ai/deepseek-coder-33b-instruct",
         "description": "DeepSeek Coder 33B — специально для программирования",
@@ -106,7 +97,6 @@ NVIDIA_FREE_MODELS = {
         "rpm": 40,
         "context": 16000
     },
-    # Qwen Coder
     "qwen-2-5-coder": {
         "id": "qwen/qwen-2.5-coder-32b-instruct",
         "description": "Qwen 2.5 Coder 32B — оптимизирована для кода",
@@ -114,7 +104,6 @@ NVIDIA_FREE_MODELS = {
         "rpm": 40,
         "context": 128000
     },
-    # Mistral
     "mistral-large": {
         "id": "mistralai/mistral-large-instruct-2407",
         "description": "Mistral Large — для ревью и анализа кода",
@@ -122,7 +111,6 @@ NVIDIA_FREE_MODELS = {
         "rpm": 40,
         "context": 128000
     },
-    # Llama
     "llama-3-3-70b": {
         "id": "meta/llama-3.3-70b-instruct",
         "description": "Llama 3.3 70B — для планирования и архитектуры",
@@ -130,7 +118,6 @@ NVIDIA_FREE_MODELS = {
         "rpm": 40,
         "context": 128000
     },
-    # Phi-4
     "phi-4": {
         "id": "microsoft/phi-4-multimodal-instruct",
         "description": "Phi-4 — для тестов и быстрых задач",
@@ -140,8 +127,8 @@ NVIDIA_FREE_MODELS = {
     }
 }
 
-# OpenRouter — ТОЛЬКО БЕСПЛАТНЫЕ модели для дебаггера
-OPENROUTER_FREE_MODELS = {
+# OpenRouter — ТОЛЬКО БЕСПЛАТНЫЕ модели
+OPENROUTER_FREE = {
     "deepseek-r1-free": {
         "id": "deepseek/deepseek-r1:free",
         "description": "DeepSeek R1 Free — reasoning для сложного дебаггинга",
@@ -175,6 +162,7 @@ class SubAgent:
     role: AgentRole
     name: str
     model_id: str
+    model_key: str
     provider: str
     system_prompt: str
     tasks_completed: int = 0
@@ -189,7 +177,6 @@ class SubAgent:
 class TaskPlan:
     complexity: int
     roles_needed: List[AgentRole]
-    model_assignments: Dict[str, str]
     phases: List[Dict[str, Any]]
     estimated_time: int
     reasoning: str
@@ -197,7 +184,6 @@ class TaskPlan:
 
 
 class RPMTracker:
-    """Отслеживает RPM для NVIDIA (40/мин)"""
     def __init__(self, max_rpm: int = 40):
         self.max_rpm = max_rpm
         self.requests: List[float] = []
@@ -235,91 +221,169 @@ class RPMTracker:
 
 class SmartOrchestrator:
     """
-    Главный оркестратор:
-    - NVIDIA NIM: ВСЕ модели бесплатные (80+ models, 40 RPM)
-    - OpenRouter: ТОЛЬКО бесплатные модели для дебаггера
-    - Автоматический выбор модели под задачу
-    - RPM контроль
+    Главный оркестратор САМ выбирает модели:
+    1. Анализирует задачу через LLM (просто текстовый анализ)
+    2. Сам решает какие роли нужны (heuristic + LLM insight)
+    3. Сам назначает модели из NVIDIA каталога по силам
+    4. При ошибке — OpenRouter бесплатный дебаггер
     """
 
     def __init__(self, nvidia_api_key: str, openrouter_api_key: Optional[str] = None):
-        # Главный мозг — NVIDIA (бесплатно)
         self.brain = NvidiaNimProvider(
             api_key=nvidia_api_key,
-            model="deepseek/deepseek-r1-0528"  # Лучшая для reasoning
+            model="deepseek/deepseek-r1-0528"
         )
 
-        # Резервный дебаггер — OpenRouter (бесплатно)
         self.debugger = None
         if openrouter_api_key:
             self.debugger = OpenRouterProvider(
                 api_key=openrouter_api_key,
-                model="deepseek/deepseek-r1:free"  # Бесплатная!
+                model="deepseek/deepseek-r1:free"
             )
 
-        # RPM трекер для NVIDIA
         self.rpm_tracker = RPMTracker(max_rpm=40)
-
         self.agents: List[SubAgent] = []
         self.task_history: List[Dict] = []
 
-        # Callbacks
         self.on_status_update: Optional[Callable] = None
         self.on_agent_complete: Optional[Callable] = None
         self.on_error: Optional[Callable] = None
 
-    def _select_model_for_role(self, role: AgentRole, task_description: str, 
-                               complexity: int, context_size: int) -> str:
+    def _score_model_for_role(self, model_key: str, role: AgentRole, 
+                               task_desc: str, complexity: int, 
+                               context_size: int) -> float:
         """
-        Выбирает лучшую бесплатную NVIDIA модель для роли.
-        Учитывает: роль, сложность, размер контекста, специализацию модели.
+        Скоринг модели для роли. Чем выше — тем лучше подходит.
+        Оркестратор САМ принимает решение, не LLM.
         """
-        role_str = role.value
+        model = NVIDIA_MODELS[model_key]
+        score = 0.0
 
-        # Для больших контекстов — Kimi 2.5 (256K)
+        # 1. Соответствие роли и strengths модели
+        role_keywords = {
+            AgentRole.ARCHITECT: ["architecture", "system_design", "planning", "design_patterns"],
+            AgentRole.CODER: ["coding", "completion", "inline_edit", "refactoring", "algorithm"],
+            AgentRole.REVIEWER: ["review", "analysis", "security", "best_practices"],
+            AgentRole.TESTER: ["testing", "quick_tasks", "lightweight"],
+            AgentRole.DEBUGGER: ["reasoning", "debugging", "complex_logic", "math"],
+            AgentRole.DEVOPS: ["fast", "simple_tasks", "general"],
+            AgentRole.SCRUM_MASTER: ["planning", "architecture", "general"],
+            AgentRole.EXPLAINER: ["documentation", "comments", "multilingual", "summarization"],
+            AgentRole.OPTIMIZER: ["coding", "refactoring", "algorithm", "data_structures"],
+        }
+
+        keywords = role_keywords.get(role, ["general"])
+        for kw in keywords:
+            if kw in model["strengths"]:
+                score += 3.0
+            # Частичное совпадение
+            for strength in model["strengths"]:
+                if kw in strength or strength in kw:
+                    score += 1.5
+
+        # 2. Контекст — большие файлы нуждаются в большом контексте
         if context_size > 100000:
-            return NVIDIA_FREE_MODELS["kimi-2-5"]["id"]
+            if model["context"] >= 256000:
+                score += 5.0
+            elif model["context"] >= 128000:
+                score += 2.0
+            else:
+                score -= 3.0
 
-        # Для reasoning / planning / architect
-        if role in (AgentRole.ARCHITECT, AgentRole.SCRUM_MASTER, AgentRole.ORCHESTRATOR) or complexity >= 8:
-            if "reasoning" in task_description.lower() or "algorithm" in task_description.lower():
-                return NVIDIA_FREE_MODELS["deepseek-r1"]["id"]
-            return NVIDIA_FREE_MODELS["llama-3-3-70b"]["id"]
+        # 3. Сложность — сложные задачи нуждаются в reasoning
+        if complexity >= 8:
+            if "reasoning" in model["strengths"] or "complex_logic" in model["strengths"]:
+                score += 4.0
 
-        # Для кодинга
-        if role == AgentRole.CODER:
-            if "refactor" in task_description.lower() or "optimize" in task_description.lower():
-                return NVIDIA_FREE_MODELS["qwen-2-5-coder"]["id"]
-            if "complex" in task_description.lower() or "algorithm" in task_description.lower():
-                return NVIDIA_FREE_MODELS["qwen3-coder"]["id"]
-            return NVIDIA_FREE_MODELS["deepseek-coder"]["id"]
+        # 4. Специфика задачи из описания
+        task_lower = task_desc.lower()
+        if "refactor" in task_lower and "refactoring" in model["strengths"]:
+            score += 2.0
+        if "test" in task_lower and "testing" in model["strengths"]:
+            score += 2.0
+        if "debug" in task_lower and "debugging" in model["strengths"]:
+            score += 2.0
+        if "ui" in task_lower or "frontend" in task_lower:
+            if "vision" in model["strengths"] or "frontend" in model["strengths"]:
+                score += 2.0
+        if "document" in task_lower or "comment" in task_lower:
+            if "documentation" in model["strengths"] or "comments" in model["strengths"]:
+                score += 2.0
 
-        # Для ревью
-        if role == AgentRole.REVIEWER:
-            return NVIDIA_FREE_MODELS["mistral-large"]["id"]
+        # 5. Штраф за маленький контекст для больших задач
+        if complexity >= 6 and model["context"] < 64000:
+            score -= 2.0
 
-        # Для тестов
-        if role == AgentRole.TESTER:
-            return NVIDIA_FREE_MODELS["phi-4"]["id"]
+        return score
 
-        # Для дебаггинга
-        if role == AgentRole.DEBUGGER:
-            return NVIDIA_FREE_MODELS["deepseek-r1"]["id"]
+    def _select_best_model(self, role: AgentRole, task_desc: str, 
+                           complexity: int, context_size: int) -> tuple:
+        """
+        Выбирает лучшую модель для роли.
+        Возвращает (model_key, model_id, score)
+        """
+        best_key = None
+        best_score = -999
 
-        # Для DevOps
-        if role == AgentRole.DEVOPS:
-            return NVIDIA_FREE_MODELS["gpt-oss-120b"]["id"]
+        for key, model in NVIDIA_MODELS.items():
+            score = self._score_model_for_role(key, role, task_desc, complexity, context_size)
+            if score > best_score:
+                best_score = score
+                best_key = key
 
-        # Для объяснений / документации
-        if role == AgentRole.EXPLAINER:
-            return NVIDIA_FREE_MODELS["glm-5-1"]["id"]
+        return best_key, NVIDIA_MODELS[best_key]["id"], best_score
 
-        # Для оптимизации
-        if role == AgentRole.OPTIMIZER:
-            return NVIDIA_FREE_MODELS["qwen-2-5-coder"]["id"]
+    def _determine_roles(self, task: str, llm_analysis: str) -> List[AgentRole]:
+        """
+        Определяет нужные роли. Комбинирует heuristic + insight от LLM.
+        """
+        task_lower = task.lower()
+        roles = []
 
-        # Default — универсальная
-        return NVIDIA_FREE_MODELS["nemotron-70b"]["id"]
+        # Всегда начинаем с планирования
+        roles.append(AgentRole.SCRUM_MASTER)
+
+        # Архитектура для новых проектов
+        if any(k in task_lower for k in ["create", "build", "new project", "design", "api", "structure", "architect"]):
+            roles.append(AgentRole.ARCHITECT)
+
+        # Кодинг почти всегда нужен
+        if not any(k in task_lower for k in ["only review", "just review", "audit", "explain"]):
+            roles.append(AgentRole.CODER)
+
+        # Ревью
+        if any(k in task_lower for k in ["review", "quality", "clean", "refactor", "improve"]):
+            roles.append(AgentRole.REVIEWER)
+
+        # Тесты
+        if any(k in task_lower for k in ["test", "coverage", "pytest", "spec"]):
+            roles.append(AgentRole.TESTER)
+
+        # Дебаггинг
+        if any(k in task_lower for k in ["fix", "bug", "error", "debug", "broken", "crash"]):
+            roles.append(AgentRole.DEBUGGER)
+
+        # DevOps
+        if any(k in task_lower for k in ["docker", "deploy", "ci/cd", "pipeline", "infra", "kubernetes"]):
+            roles.append(AgentRole.DEVOPS)
+
+        # Объяснения
+        if any(k in task_lower for k in ["explain", "document", "comment", "docstring", "understand"]):
+            roles.append(AgentRole.EXPLAINER)
+
+        # Оптимизация
+        if any(k in task_lower for k in ["optimize", "performance", "speed", "memory", "cache"]):
+            roles.append(AgentRole.OPTIMIZER)
+
+        # Убираем дубликаты
+        seen = set()
+        unique = []
+        for r in roles:
+            if r not in seen:
+                seen.add(r)
+                unique.append(r)
+
+        return unique
 
     def _call_brain(self, prompt: str, temperature: float = 0.3) -> str:
         """Вызов главного оркестратора (NVIDIA) с контролем RPM"""
@@ -347,115 +411,138 @@ class SmartOrchestrator:
             raise
 
     def analyze_task(self, task: str) -> TaskPlan:
-        """Главный оркестратор анализирует задачу и выбирает модели"""
+        """
+        Главный оркестратор анализирует задачу.
+        НЕ просит LLM выбрать модели — сам решает.
+        """
 
-        # Оцениваем размер контекста
-        context_size = len(task) * 4  # примерно 4 токена на символ
-
-        prompt = f"""Ты — Главный Оркестратор AI Agent. Проанализируй задачу и составь план.
-
-Доступные БЕСПЛАТНЫЕ модели NVIDIA NIM (80+ models, 40 RPM, no credit card):
-{json.dumps(NVIDIA_FREE_MODELS, indent=2, ensure_ascii=False)}
+        # Шаг 1: LLM даёт анализ задачи (сложность, контекст, тип)
+        prompt = f"""Ты — Главный Оркестратор AI Agent. Проанализируй задачу.
 
 Задача: {task}
 
 Проанализируй:
 1. Сложность задачи (1-10)
-2. Какие роли нужны (coder, reviewer, tester, debugger, devops, scrum, architect, explainer, optimizer)
-3. Какую модель NVIDIA назначить каждой роли (по силам модели)
-4. Порядок выполнения фаз
-5. Оцени размер контекста в токенах
-6. Оцени время в минутах
+2. Примерный размер контекста в токенах (оцени по длине задачи)
+3. Тип задачи (coding, debugging, architecture, testing, documentation, etc.)
+4. Ключевые требования
+5. Потенциальные сложности
 
 Верни ТОЛЬКО JSON:
 {{
     "complexity": 7,
-    "roles_needed": ["scrum", "architect", "coder", "tester", "reviewer"],
-    "model_assignments": {{
-        "scrum": "llama-3-3-70b",
-        "architect": "deepseek-r1",
-        "coder": "qwen3-coder",
-        "tester": "phi-4",
-        "reviewer": "mistral-large"
-    }},
-    "phases": [
-        {{"role": "scrum", "task": "Разбить на подзадачи", "depends_on": [], "estimated_tokens": 2000}},
-        {{"role": "architect", "task": "Спроектировать архитектуру", "depends_on": ["scrum"], "estimated_tokens": 4000}},
-        {{"role": "coder", "task": "Написать код", "depends_on": ["architect"], "estimated_tokens": 8000}},
-        {{"role": "tester", "task": "Написать тесты", "depends_on": ["coder"], "estimated_tokens": 3000}},
-        {{"role": "reviewer", "task": "Ревью кода", "depends_on": ["coder"], "estimated_tokens": 5000}}
-    ],
+    "context_size_estimate": 5000,
+    "task_type": "coding",
+    "key_requirements": ["REST API", "FastAPI", "authentication"],
+    "potential_challenges": ["JWT implementation", "database schema"],
     "estimated_time": 15,
-    "context_size_estimate": 22000,
-    "reasoning": "Задача средней сложности, нужен план + архитектура + код + тесты + ревью"
+    "reasoning": "Задача средней сложности — нужен API с авторизацией"
 }}
 """
 
         response = self._call_brain(prompt, temperature=0.2)
 
+        # Парсим анализ
         try:
             import re
             json_match = re.search(r'\{.*\}', response, re.DOTALL)
             if json_match:
-                plan_data = json.loads(json_match.group())
+                analysis = json.loads(json_match.group())
             else:
-                plan_data = json.loads(response)
+                analysis = json.loads(response)
+        except Exception:
+            analysis = {
+                "complexity": 5,
+                "context_size_estimate": len(task) * 4,
+                "task_type": "general",
+                "key_requirements": [],
+                "potential_challenges": [],
+                "estimated_time": 10,
+                "reasoning": "Default analysis"
+            }
 
-            roles = []
-            for r in plan_data.get("roles_needed", []):
-                try:
-                    roles.append(AgentRole(r))
-                except ValueError:
-                    pass
+        complexity = analysis.get("complexity", 5)
+        context_size = analysis.get("context_size_estimate", len(task) * 4)
 
-            return TaskPlan(
-                complexity=plan_data.get("complexity", 5),
-                roles_needed=roles,
-                model_assignments=plan_data.get("model_assignments", {}),
-                phases=plan_data.get("phases", []),
-                estimated_time=plan_data.get("estimated_time", 10),
-                reasoning=plan_data.get("reasoning", ""),
-                context_size_estimate=plan_data.get("context_size_estimate", 0)
+        # Шаг 2: САМ определяем роли (heuristic)
+        roles = self._determine_roles(task, response)
+
+        # Шаг 3: САМ назначаем модели (scoring)
+        phases = []
+        for role in roles:
+            # Находим лучшую модель для роли
+            model_key, model_id, score = self._select_best_model(
+                role, 
+                analysis.get("task_type", ""),
+                complexity,
+                context_size
             )
-        except Exception as e:
-            # Fallback
-            return TaskPlan(
-                complexity=5,
-                roles_needed=[AgentRole.CODER],
-                model_assignments={"coder": "nemotron-70b"},
-                phases=[{"role": "coder", "task": task, "depends_on": [], "estimated_tokens": 4000}],
-                estimated_time=10,
-                reasoning=f"Fallback: {str(e)}",
-                context_size_estimate=len(task) * 4
-            )
+
+            # Определяем зависимости
+            depends = []
+            if role == AgentRole.CODER and AgentRole.ARCHITECT in roles:
+                depends = ["architect"]
+            elif role == AgentRole.TESTER and AgentRole.CODER in roles:
+                depends = ["coder"]
+            elif role == AgentRole.REVIEWER and AgentRole.CODER in roles:
+                depends = ["coder"]
+            elif role == AgentRole.DEBUGGER:
+                # Дебаггер может работать параллельно или после
+                depends = []
+
+            phases.append({
+                "role": role.value,
+                "task": self._get_task_for_role(role, task),
+                "depends_on": depends,
+                "model_key": model_key,
+                "model_id": model_id,
+                "model_score": score,
+                "estimated_tokens": min(context_size, model["context"] // 2)
+            })
+
+        return TaskPlan(
+            complexity=complexity,
+            roles_needed=roles,
+            phases=phases,
+            estimated_time=analysis.get("estimated_time", 10),
+            reasoning=analysis.get("reasoning", ""),
+            context_size_estimate=context_size
+        )
+
+    def _get_task_for_role(self, role: AgentRole, original_task: str) -> str:
+        """Генерирует специфичную задачу для роли"""
+        role_tasks = {
+            AgentRole.SCRUM_MASTER: f"Разбей задачу на подзадачи с acceptance criteria: {original_task}",
+            AgentRole.ARCHITECT: f"Спроектируй архитектуру и структуру для: {original_task}",
+            AgentRole.CODER: f"Напиши production-ready код для: {original_task}",
+            AgentRole.REVIEWER: f"Проведи code review с security и performance анализом",
+            AgentRole.TESTER: f"Напиши comprehensive тесты с edge cases",
+            AgentRole.DEBUGGER: f"Найди и исправь потенциальные баги",
+            AgentRole.DEVOPS: f"Настрой Docker, CI/CD и deployment",
+            AgentRole.EXPLAINER: f"Напиши документацию и комментарии",
+            AgentRole.OPTIMIZER: f"Оптимизируй производительность и память",
+        }
+        return role_tasks.get(role, original_task)
 
     def create_agents(self, plan: TaskPlan) -> List[SubAgent]:
-        """Создаёт агентов по плану с автоматическим выбором моделей"""
+        """Создаёт агентов по плану — модели уже выбраны оркестратором"""
         self.agents = []
 
-        for role in plan.roles_needed:
-            role_str = role.value
+        for phase in plan.phases:
+            role_str = phase["role"]
+            try:
+                role = AgentRole(role_str)
+            except ValueError:
+                continue
 
-            # Получаем модель из плана или автовыбор
-            model_key = plan.model_assignments.get(role_str)
-            if model_key and model_key in NVIDIA_FREE_MODELS:
-                model_info = NVIDIA_FREE_MODELS[model_key]
-            else:
-                # Автовыбор по роли и контексту
-                task_desc = ""
-                for phase in plan.phases:
-                    if phase.get("role") == role_str:
-                        task_desc = phase.get("task", "")
-                        break
-                model_id = self._select_model_for_role(role, task_desc, plan.complexity, plan.context_size_estimate)
-                # Найдём ключ по ID
-                model_key = next((k for k, v in NVIDIA_FREE_MODELS.items() if v["id"] == model_id), "nemotron-70b")
-                model_info = NVIDIA_FREE_MODELS[model_key]
+            model_key = phase["model_key"]
+            model_id = phase["model_id"]
 
             agent = SubAgent(
                 role=role,
                 name=f"{role_str}_{model_key}",
-                model_id=model_info["id"],
+                model_id=model_id,
+                model_key=model_key,
                 provider="nvidia",
                 system_prompt=self._get_role_prompt(role)
             )
@@ -484,31 +571,37 @@ class SmartOrchestrator:
         yield f"🧠 [Оркестратор] Анализирую задачу...\n"
         yield f"📋 Задача: {task[:200]}...\n"
 
-        # Шаг 1: Анализ
+        # Шаг 1: Анализ (оркестратор САМ решает)
         plan = self.analyze_task(task)
-        yield f"\n📊 Анализ:\n"
+        yield f"\n📊 Анализ завершён:\n"
         yield f"   Сложность: {plan.complexity}/10\n"
         yield f"   Роли: {[r.value for r in plan.roles_needed]}\n"
-        yield f"   Модели: {plan.model_assignments}\n"
         yield f"   Контекст: ~{plan.context_size_estimate} токенов\n"
         yield f"   Время: ~{plan.estimated_time} мин\n"
         yield f"   Логика: {plan.reasoning}\n"
 
-        # Шаг 2: Создаём агентов
+        # Шаг 2: Показываем выбор моделей (оркестратор САМ выбрал)
+        yield f"\n🎯 Модели выбраны оркестратором:\n"
+        for phase in plan.phases:
+            model_key = phase["model_key"]
+            model_info = NVIDIA_MODELS[model_key]
+            score = phase["model_score"]
+            yield f"   • {phase['role'].upper()} → {model_key} ({model_info['id']})\n"
+            yield f"     Почему: {model_info['description']}\n"
+            yield f"     Score: {score:.1f} | Контекст: {model_info['context']}\n"
+
+        # Шаг 3: Создаём агентов
         agents = self.create_agents(plan)
         yield f"\n👥 Создано агентов: {len(agents)}\n"
-        for a in agents:
-            model_name = next((k for k, v in NVIDIA_FREE_MODELS.items() if v["id"] == a.model_id), "unknown")
-            yield f"   • {a.name} → {model_name} ({a.model_id})\n"
 
-        # Шаг 3: Выполняем фазы
+        # Шаг 4: Выполняем фазы
         completed_phases = set()
 
         for phase in plan.phases:
             role_str = phase["role"]
             phase_task = phase["task"]
-            depends = phase.get("depends_on", [])
-            est_tokens = phase.get("estimated_tokens", 4000)
+            depends = phase["depends_on"]
+            est_tokens = phase["estimated_tokens"]
 
             # Ждём зависимости
             if depends:
@@ -555,9 +648,6 @@ class SmartOrchestrator:
                     yield f"\n🔍 Вызываю дебаггера (OpenRouter FREE)...\n"
                     debug_result = self._call_debugger(agent, str(e), task)
                     yield f"🩺 Диагноз: {debug_result[:1000]}...\n"
-
-                    # Перепланируем с учётом диагноза
-                    yield f"\n🔄 Перепланирую с учётом диагноза...\n"
                 else:
                     yield f"⚠️ Дебаггер не настроен\n"
 
@@ -575,8 +665,8 @@ class SmartOrchestrator:
         yield f"   🔄 RPM использовано: {self.rpm_tracker.get_status()}\n"
 
         for a in agents:
-            model_name = next((k for k, v in NVIDIA_FREE_MODELS.items() if v["id"] == a.model_id), "unknown")
-            yield f"\n   {a.name} ({model_name}): {a.status.upper()} ({a.tasks_completed} задач)\n"
+            yield f"\n   {a.name} ({a.model_key}): {a.status.upper()}\n"
+            yield f"      Задач: {a.tasks_completed} | Токенов: {a.tokens_used}\n"
 
     def _execute_agent_task(self, agent: SubAgent, task: str, context_agents: List[SubAgent]) -> str:
         """Выполняет задачу агента через его модель NVIDIA"""
@@ -597,13 +687,11 @@ class SmartOrchestrator:
 Выполни задачу профессионально. Верни результат.
 """
 
-        # Создаём провайдер для этой модели
         provider = NvidiaNimProvider(
             api_key=self.brain.api_key,
             model=agent.model_id
         )
 
-        # RPM контроль
         while not self.rpm_tracker.can_request():
             time.sleep(self.rpm_tracker.wait_time())
         self.rpm_tracker.add_request()
@@ -617,16 +705,12 @@ class SmartOrchestrator:
         return response
 
     def _call_debugger(self, failed_agent: SubAgent, error: str, original_task: str) -> str:
-        """Вызывает OpenRouter дебаггер (бесплатную модель)"""
+        """Вызывает OpenRouter дебаггер (бесплатная модель)"""
 
         if not self.debugger:
             return "Дебаггер не настроен"
 
-        # Выбираем лучшую бесплатную модель для дебаггинга
-        # Пробуем DeepSeek R1 Free для сложного reasoning
-        debug_model = OPENROUTER_FREE_MODELS["deepseek-r1-free"]
-
-        prompt = f"""Ты — Senior Debugger. Проанализируй ошибку и дай рекомендации.
+        prompt = f"""Ты — Senior Debugger. Проанализируй ошибку.
 
 Оригинальная задача: {original_task}
 
@@ -637,17 +721,10 @@ class SmartOrchestrator:
 Ошибка:
 {error}
 
-Вывод агента перед ошибкой:
+Вывод агента:
 {failed_agent.output[:3000]}
 
-Проанализируй:
-1. Причина ошибки (root cause)
-2. Что пошло не так в логике модели
-3. Как исправить (конкретные шаги)
-4. Нужна ли другая модель NVIDIA для этой подзадачи (из списка: deepseek-r1, qwen3-coder, kimi-2-5, mistral-large, phi-4)
-5. Команда для оркестратора
-
-Верни структурированный ответ.
+Проанализируй и дай рекомендации.
 """
 
         try:
@@ -665,7 +742,8 @@ class SmartOrchestrator:
                     "name": a.name,
                     "role": a.role.value,
                     "status": a.status,
-                    "model": a.model_id,
+                    "model_key": a.model_key,
+                    "model_id": a.model_id,
                     "tasks": a.tasks_completed,
                     "errors": len(a.error_log),
                     "tokens": a.tokens_used,
@@ -676,6 +754,6 @@ class SmartOrchestrator:
             "brain_model": self.brain.model if hasattr(self.brain, 'model') else "unknown",
             "debugger_available": self.debugger is not None,
             "debugger_model": self.debugger.model if self.debugger else None,
-            "nvidia_models_available": len(NVIDIA_FREE_MODELS),
-            "openrouter_free_models": len(OPENROUTER_FREE_MODELS)
+            "nvidia_models_available": len(NVIDIA_MODELS),
+            "openrouter_free_models": len(OPENROUTER_FREE)
         }
