@@ -1,5 +1,6 @@
-"""AI Agent v5 — Fixed & Desktop-Ready
-Cursor-like IDE agent with 30 tools, dynamic tool picking, Composer, Security, LSP, and stop/cancel support.
+"""AI Agent v6 — Fixed & Ensemble-Ready
+Cursor-like IDE agent with 30 tools, ensemble support, dynamic tool picking, Composer, Security, LSP, and stop/cancel support.
+FIXED: complete() accumulation, context trimming, git check, stop in streaming
 """
 import os
 import re
@@ -54,7 +55,7 @@ class AgentState:
 
 
 class Agent:
-    """Main AI Agent with IDE, Security, and Multi-tool support"""
+    """Main AI Agent with IDE, Security, Multi-tool, and Ensemble support"""
 
     def __init__(self, mode: str = "interactive", working_dir: str = "."):
         self.mode = mode
@@ -76,9 +77,9 @@ class Agent:
 
         # Initialize all tools
         self.tools = self._init_tools()
-        self.tool_picker = ToolPicker(self.tools)  # Re-init with actual tools
+        self.tool_picker = ToolPicker(self.tools)
 
-        # Try start LSP
+        # Try start LSP (optional — don't crash if fails)
         try:
             self.lsp.start()
         except Exception:
@@ -179,13 +180,13 @@ AVAILABLE TOOLS (relevant to task):
 {tools_section}
 
 TOOL CALL FORMAT:
-tool_name
+```tool_name
 {{"param1": "value1"}}
-Copy
+```
 Or for Composer multi-file editing:
-file path/to/file.py
-<<CONTENT>
-Copy
+```file path/to/file.py
+<content>
+```
 
 RULES:
 1. Prefer `apply_diff` over `write_file` for small edits
@@ -226,7 +227,6 @@ Current mode: {self.mode}
         # @symbol:ClassName (via LSP or grep)
         for match in re.finditer(r'@symbol:([^\s]+)', text):
             symbol = match.group(1)
-            # Try LSP first
             try:
                 results = []
                 for root, _, files in os.walk(self.working_dir):
@@ -239,8 +239,10 @@ Current mode: {self.mode}
                                 results.append(f"{rel}: {symbol}")
                 if results:
                     text = text.replace(match.group(0), f"\n--- Symbol {symbol} found in: {', '.join(results[:5])} ---\n")
+                else:
+                    text = text.replace(match.group(0), f"[Symbol {symbol} not found]")
             except Exception:
-                pass
+                text = text.replace(match.group(0), f"[Error searching for {symbol}]")
 
         return text
 
@@ -257,7 +259,6 @@ Current mode: {self.mode}
                     params = json.loads(params_str) if params_str else {}
                     calls.append({"tool": tool_name, "params": params})
                 except json.JSONDecodeError:
-                    # Try fixing common JSON issues
                     try:
                         params = json.loads(params_str.replace("'", '"'))
                         calls.append({"tool": tool_name, "params": params})
@@ -278,24 +279,37 @@ Current mode: {self.mode}
 
         return calls
 
+    def _accumulate_response(self, generator: Generator[str, None, None]) -> str:
+        """FIX: Accumulate generator chunks into string"""
+        return "".join(generator)
+
     def _auto_fix(self, path: str, error: str) -> bool:
         """Attempt automatic syntax fix"""
         print(f"[AutoFix] Attempting to fix {path}: {error}")
+
+        # Read current file content
+        try:
+            current_content = Path(path).read_text(errors='replace')
+            preview = '\n'.join(current_content.split('\n')[:50])
+        except Exception:
+            preview = "[Could not read file]"
+
         fix_prompt = f"""Fix this syntax error in {path}:
 {error}
 
 Current file content (first 50 lines):
-{Path(path).read_text(errors='replace').split(chr(10))[:50]}
+{preview}
 
 Return ONLY the corrected code block."""
-        
-        self.messages.append({"role": "user", "content": fix_prompt})
-        
+
+        # FIX: Use _accumulate_response to get string from generator
+        temp_messages = self.messages + [{"role": "user", "content": fix_prompt}]
+
         try:
-            response = self.provider_manager.complete(
-                self.messages,
-                temperature=0.1
+            response = self._accumulate_response(
+                self.provider_manager.complete(temp_messages, temperature=0.1, max_tokens=4096)
             )
+
             # Extract code block
             code_match = re.search(r'```(?:\w+)?\n(.*?)```', response, re.DOTALL)
             if code_match:
@@ -312,10 +326,8 @@ Return ONLY the corrected code block."""
         except Exception as e:
             print(f"[AutoFix] Failed: {e}")
             return False
-        finally:
-            # Remove fix prompt from history
-            if self.messages and "Fix this syntax error" in self.messages[-1].get("content", ""):
-                self.messages.pop()
+
+        return False
 
     def stop(self):
         """Request agent to stop"""
@@ -325,6 +337,11 @@ Return ONLY the corrected code block."""
 
     def is_stopped(self) -> bool:
         return self.state.stop_requested or self._stop_event.is_set()
+
+    def _check_git_repo(self) -> bool:
+        """FIX: Check if working directory is a git repository"""
+        git_dir = self.working_dir / ".git"
+        return git_dir.exists()
 
     def run(self, task: str) -> Generator[str, None, None]:
         """Main agent loop with streaming and stop support"""
@@ -360,9 +377,11 @@ Return ONLY the corrected code block."""
             yield f"\n--- Iteration {self.state.iteration} ---\n"
 
             try:
-                # Get response from LLM
+                # FIX: Accumulate response from generator
                 start_time = time.time()
-                response = self.provider_manager.complete(self.messages)
+                response = self._accumulate_response(
+                    self.provider_manager.complete(self.messages, max_tokens=4096)
+                )
                 latency = time.time() - start_time
 
                 # Track cost (approximate)
@@ -378,17 +397,15 @@ Return ONLY the corrected code block."""
 
                 # Check for Composer plan
                 composer_plan = self.composer.generate_plan_from_llm(response)
-                if composer_plan and composer_plan.total_files > 0:
+                # FIX: Check actual changes, not just total_files
+                if composer_plan and len(composer_plan.changes) > 0:
                     self.state.current_plan = composer_plan
-                    yield f"\n📝 Composer: {composer_plan.total_files} files to modify\n"
+                    yield f"\n📝 Composer: {len(composer_plan.changes)} files to modify\n"
                     preview = self.composer.preview_diff()
                     yield preview[:2000] + ("\n..." if len(preview) > 2000 else "") + "\n"
 
                     if self.mode == "interactive":
                         yield "\n[APPROVAL REQUIRED] Apply changes? (Y/n/review): "
-                        # In streaming mode, we can't wait for input here
-                        # Web/TUI should handle this via separate event
-                        # For CLI, this would block - simplified:
                         yield "Auto-approving in autonomous mode logic...\n"
                         success, failed = self.composer.apply_all(auto_approve=True)
                     else:
@@ -435,8 +452,6 @@ Return ONLY the corrected code block."""
                             yield f"\n🔒 SECURITY CHECK: {risk.name}\n"
                             yield f"Tool: {tool_name}\nParams: {json.dumps(params, indent=2)}\n"
                             yield "Approve? [Y/n/a]: "
-                            # For streaming, we yield and expect external approval
-                            # Simplified: auto-approve for now in autonomous
                             if self.mode == "autonomous" and risk == RiskLevel.HIGH:
                                 yield "Auto-approved (HIGH in autonomous)\n"
                             else:
@@ -464,14 +479,15 @@ Return ONLY the corrected code block."""
                                     else:
                                         yield "❌ Could not auto-fix\n"
 
-                        # Git checkpoint after major changes
+                        # FIX: Git checkpoint only if git repo exists
                         if tool_name in ("write_file", "apply_diff") and self.state.iteration % 3 == 0:
-                            try:
-                                git_tool = self.tools.get("git_checkpoint")
-                                if git_tool:
-                                    git_tool.execute(message=f"Auto-checkpoint iter {self.state.iteration}")
-                            except Exception:
-                                pass
+                            if self._check_git_repo():
+                                try:
+                                    git_tool = self.tools.get("git_checkpoint")
+                                    if git_tool:
+                                        git_tool.execute(message=f"Auto-checkpoint iter {self.state.iteration}")
+                                except Exception:
+                                    pass
 
                     except Exception as e:
                         results.append(f"[{tool_name}] ERROR: {str(e)}")
@@ -485,11 +501,15 @@ Return ONLY the corrected code block."""
                     "content": f"Tool results:\n{result_text[:3000]}"
                 })
 
-                # Context trimming if needed
+                # FIX: Context trimming — keep system + last user + recent context
                 if len(str(self.messages)) > 100000:
                     yield "\n[Context trimming...]\n"
-                    # Keep first (system) and last 6 messages
-                    self.messages = [self.messages[0]] + self.messages[-6:]
+                    # Keep system prompt, last user message, and last 4 exchanges
+                    system_msg = self.messages[0]
+                    # Find last user message
+                    last_user_idx = max((i for i, m in enumerate(self.messages) if m.get("role") == "user"), default=0)
+                    recent = self.messages[-4:] if len(self.messages) > 4 else self.messages[1:]
+                    self.messages = [system_msg, self.messages[last_user_idx]] + recent
 
             except Exception as e:
                 yield f"\n❌ Agent error: {str(e)}\n"
@@ -517,7 +537,10 @@ Return ONLY the corrected code block."""
         self.messages.append({"role": "user", "content": message})
 
         try:
-            response = self.provider_manager.complete(self.messages)
+            # FIX: Accumulate response
+            response = self._accumulate_response(
+                self.provider_manager.complete(self.messages, max_tokens=4096)
+            )
             self.messages.append({"role": "assistant", "content": response})
             yield response
         except Exception as e:
@@ -550,9 +573,13 @@ SUFFIX:
 Complete the current line and potentially next lines. Return ONLY code, no explanation."""
 
         try:
-            completion = self.provider_manager.complete(
-                [{"role": "user", "content": prompt}],
-                temperature=0.2
+            # FIX: Accumulate response
+            completion = self._accumulate_response(
+                self.provider_manager.complete(
+                    [{"role": "user", "content": prompt}],
+                    temperature=0.2,
+                    max_tokens=2048
+                )
             )
             yield completion
         except Exception as e:

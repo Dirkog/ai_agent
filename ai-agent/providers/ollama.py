@@ -1,21 +1,29 @@
-"""Ollama provider implementation (OpenAI-compatible API)"""
+"""Ollama provider implementation (OpenAI-compatible API)
+v6 update: temperature/max_tokens params, no api_key required
+"""
 import json
 from typing import Generator, Optional
 from .base import BaseProvider, ProviderError
 
+
 class OllamaProvider(BaseProvider):
-    def chat(self, messages: list, tools: Optional[list] = None, stream: bool = False) -> Generator[str, None, None]:
+    def chat(self, messages: list, tools: Optional[list] = None,
+             stream: bool = False, temperature: float = 0.7,
+             max_tokens: int = 4096) -> Generator[str, None, None]:
         url = f"{self.config.base_url}/chat/completions"
         headers = {
-            "Authorization": f"Bearer {self.config.api_key}",
             "Content-Type": "application/json"
         }
+        # Ollama doesn't require Authorization header
+        if self.config.api_key and self.config.api_key != "ollama":
+            headers["Authorization"] = f"Bearer {self.config.api_key}"
 
         payload = {
             "model": self.config.model,
             "messages": messages,
             "stream": stream,
-            "temperature": 0.7
+            "temperature": temperature,
+            "max_tokens": max_tokens
         }
 
         if tools:
@@ -23,9 +31,12 @@ class OllamaProvider(BaseProvider):
             payload["tool_choice"] = "auto"
 
         if stream:
-            response = self.client.post(url, headers=headers, json=payload, timeout=self.config.timeout)
+            response = self.client.post(url, headers=headers, json=payload,
+                                       timeout=getattr(self.config, 'timeout', 300))
             if response.status_code != 200:
                 raise ProviderError(f"Ollama error: {response.text[:500]}")
+
+            response.raise_for_status()
 
             for line in response.iter_lines():
                 if line:

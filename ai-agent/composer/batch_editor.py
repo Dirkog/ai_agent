@@ -1,12 +1,14 @@
-"""Composer — batch multi-file editing with atomic transactions
+"""Composer — batch multi-file editing with atomic transactions and topological sort
 Like Cursor Composer: plans changes across multiple files, shows unified diff, applies atomically.
+v6 update: Fixed _sort_by_dependencies to use Kahn's algorithm, improved diff preview
 """
 import json
 import re
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Set
 from dataclasses import dataclass, field
 from enum import Enum
+from collections import defaultdict, deque
 
 
 class ChangeStatus(Enum):
@@ -30,7 +32,7 @@ class FileChange:
 
 @dataclass
 class ComposerPlan:
-    task: str
+    task: str = ""
     changes: List[FileChange] = field(default_factory=list)
     checkpoint_commit: Optional[str] = None
     total_files: int = 0
@@ -38,7 +40,7 @@ class ComposerPlan:
 
 
 class BatchEditor:
-    """Batch file editor with atomic apply/revert"""
+    """Batch file editor with atomic apply/revert and topological sorting"""
 
     def __init__(self, working_dir: str = "."):
         self.working_dir = Path(working_dir).resolve()
@@ -99,50 +101,51 @@ class BatchEditor:
         lines = [
             "=" * 70,
             f"📝 COMPOSER PLAN: {self.current_plan.task}",
-            f"Files: {self.current_plan.total_files} | Est. tokens: {self.current_plan.estimated_tokens}",
+            f"Files: {len(self.current_plan.changes)} | Est. tokens: {self.current_plan.estimated_tokens}",
             "=" * 70,
         ]
 
         for i, change in enumerate(self.current_plan.changes, 1):
-            lines.append(f"\n--- [{i}/{self.current_plan.total_files}] {change.path} ---")
+            lines.append(f"\n--- [{i}/{len(self.current_plan.changes)}] {change.path} ---")
             lines.append(f"Reason: {change.reason}")
 
             if change.dependencies:
                 lines.append(f"Dependencies: {', '.join(change.dependencies)}")
 
             if change.original_content and change.new_content:
-                # Show mini-diff
-                orig_lines = change.original_content.splitlines()
-                new_lines = change.new_content.splitlines()
-
-                # Simple line-by-line diff indicator
-                max_lines = max(len(orig_lines), len(new_lines))
-                diff_lines = []
-                for j in range(min(max_lines, 20)):
-                    old = orig_lines[j] if j < len(orig_lines) else ""
-                    new = new_lines[j] if j < len(new_lines) else ""
-                    if old != new:
-                        if not old:
-                            diff_lines.append(f"  + {new[:60]}")
-                        elif not new:
-                            diff_lines.append(f"  - {old[:60]}")
-                        else:
-                            diff_lines.append(f"  ~ {new[:60]}")
-
-                if diff_lines:
-                    lines.append("Changes:")
-                    lines.extend(diff_lines)
-                else:
-                    lines.append("(no visible changes in first 20 lines)")
+                # Generate unified diff
+                diff_lines = self._generate_unified_diff(
+                    change.original_content, change.new_content, change.path
+                )
+                lines.append("\nDiff:")
+                lines.extend(diff_lines[:30])  # Show first 30 lines of diff
+                if len(diff_lines) > 30:
+                    lines.append(f"... ({len(diff_lines) - 30} more lines)")
             elif not change.original_content:
                 lines.append("[NEW FILE]")
                 preview = change.new_content[:200].replace('\n', ' ')
-                lines.append(f"  {preview}...")
+                lines.append(f" {preview}...")
 
             lines.append(f"Status: {change.status.value}")
+            lines.append("\n" + "-" * 70)
 
-        lines.append("\n" + "=" * 70)
         return "\n".join(lines)
+
+    def _generate_unified_diff(self, original: str, new: str, path: str, context: int = 3) -> List[str]:
+        """Generate unified diff between original and new content"""
+        orig_lines = original.splitlines()
+        new_lines = new.splitlines()
+
+        # Simple line-by-line diff
+        import difflib
+        diff = list(difflib.unified_diff(
+            orig_lines, new_lines,
+            fromfile=f"a/{path}",
+            tofile=f"b/{path}",
+            lineterm="",
+            n=context
+        ))
+        return diff
 
     def approve_all(self) -> None:
         """Mark all changes as approved"""
@@ -174,7 +177,7 @@ class BatchEditor:
             if full_path.exists():
                 self._backup[change.path] = full_path.read_text(encoding='utf-8')
 
-        # Apply in dependency order
+        # FIX: Apply in topological order (dependencies first)
         sorted_changes = self._sort_by_dependencies(self.current_plan.changes)
 
         for change in sorted_changes:
@@ -184,12 +187,12 @@ class BatchEditor:
                 full_path.write_text(change.new_content, encoding='utf-8')
                 change.status = ChangeStatus.APPLIED
                 success += 1
-                print(f"  ✅ {change.path}")
+                print(f" ✅ {change.path}")
             except Exception as e:
                 change.status = ChangeStatus.FAILED
                 change.reason += f" | Error: {e}"
                 failed += 1
-                print(f"  ❌ {change.path}: {e}")
+                print(f" ❌ {change.path}: {e}")
 
         if failed > 0 and not auto_approve:
             revert = input(f"\n{failed} failed. Revert all? [Y/n]: ").strip().lower()
@@ -211,11 +214,11 @@ class BatchEditor:
             if change.original_content:
                 print("Original (first 5 lines):")
                 for line in change.original_content.splitlines()[:5]:
-                    print(f"  {line}")
+                    print(f" {line}")
 
             print("New (first 5 lines):")
             for line in change.new_content.splitlines()[:5]:
-                print(f"  {line}")
+                print(f" {line}")
 
             action = input("[a]pply, [s]kip, [r]eview full, [q]uit: ").strip().lower()
 
@@ -259,11 +262,37 @@ class BatchEditor:
         print("🔄 All changes reverted")
 
     def _sort_by_dependencies(self, changes: List[FileChange]) -> List[FileChange]:
-        """Topological sort by file dependencies"""
-        # Simple: files with no dependencies first
-        no_deps = [c for c in changes if not c.dependencies]
-        has_deps = [c for c in changes if c.dependencies]
-        return no_deps + has_deps
+        """FIX: Topological sort using Kahn's algorithm"""
+        # Build dependency graph
+        path_to_change = {c.path: c for c in changes}
+        in_degree = {c.path: 0 for c in changes}
+        graph = defaultdict(list)
+
+        for change in changes:
+            for dep in change.dependencies:
+                if dep in path_to_change:
+                    graph[dep].append(change.path)
+                    in_degree[change.path] += 1
+
+        # Kahn's algorithm
+        queue = deque([p for p, d in in_degree.items() if d == 0])
+        sorted_paths = []
+
+        while queue:
+            path = queue.popleft()
+            sorted_paths.append(path)
+            for neighbor in graph[path]:
+                in_degree[neighbor] -= 1
+                if in_degree[neighbor] == 0:
+                    queue.append(neighbor)
+
+        # Check for cycles
+        if len(sorted_paths) != len(changes):
+            # Cycle detected — return original order as fallback
+            print("⚠️ Dependency cycle detected, using original order")
+            return changes
+
+        return [path_to_change[p] for p in sorted_paths]
 
     def get_summary(self) -> str:
         """Get execution summary"""

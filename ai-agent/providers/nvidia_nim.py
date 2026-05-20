@@ -1,10 +1,15 @@
-"""NVIDIA NIM provider implementation"""
+"""NVIDIA NIM provider implementation
+v6 update: max_tokens=4096, temperature/max_tokens params, status check
+"""
 import json
 from typing import Generator, Optional
 from .base import BaseProvider, ProviderError
 
+
 class NvidiaNimProvider(BaseProvider):
-    def chat(self, messages: list, tools: Optional[list] = None, stream: bool = False) -> Generator[str, None, None]:
+    def chat(self, messages: list, tools: Optional[list] = None,
+             stream: bool = False, temperature: float = 0.2,
+             max_tokens: int = 4096) -> Generator[str, None, None]:
         url = f"{self.config.base_url}/chat/completions"
         headers = {
             "Authorization": f"Bearer {self.config.api_key}",
@@ -15,8 +20,8 @@ class NvidiaNimProvider(BaseProvider):
             "model": self.config.model,
             "messages": messages,
             "stream": stream,
-            "temperature": 0.2,
-            "max_tokens": 1024
+            "temperature": temperature,
+            "max_tokens": max_tokens  # FIX: Was hardcoded 1024, now configurable
         }
 
         if tools:
@@ -24,10 +29,14 @@ class NvidiaNimProvider(BaseProvider):
             payload["tool_choice"] = "auto"
 
         if stream:
-            response = self.client.post(url, headers=headers, json=payload, timeout=self.config.timeout)
+            response = self.client.post(url, headers=headers, json=payload, 
+                                       timeout=getattr(self.config, 'timeout', 120))
+            # FIX: Add raise_for_status for streaming
             if response.status_code != 200:
                 self._parse_retry_after(response.text, dict(response.headers))
                 raise ProviderError(f"NVIDIA NIM error: {response.text[:500]}")
+
+            response.raise_for_status()  # FIX: Check HTTP status
 
             for line in response.iter_lines():
                 if line:

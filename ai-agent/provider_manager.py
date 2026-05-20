@@ -1,4 +1,6 @@
-"""Provider manager with failover and rate limit handling"""
+"""Provider manager with ensemble support, failover and rate limit handling
+v6 update: chat() renamed to complete(), added ensemble integration
+"""
 import time
 from typing import Generator, Optional, List, Dict, Any
 from config import CONFIG, ProviderConfig
@@ -6,20 +8,29 @@ from providers import BaseProvider, RateLimitError, ProviderError
 from providers.openrouter import OpenRouterProvider
 from providers.nvidia_nim import NvidiaNimProvider
 from providers.ollama import OllamaProvider
+from providers.vllm_provider import VLLMProvider
+from providers.ensemble_provider import EnsembleProvider
+
 
 class ProviderManager:
     def __init__(self):
         self.providers: Dict[str, BaseProvider] = {}
         self.provider_order: List[str] = []
         self.unavailable_providers: set = set()
+        self.ensemble: Optional[EnsembleProvider] = None
+        self.current_provider_name: str = "unknown"
 
         for cfg in sorted(CONFIG.providers, key=lambda x: x.priority):
+            if cfg is None:
+                continue
             if cfg.name == "openrouter":
                 provider = OpenRouterProvider(cfg)
             elif cfg.name == "nvidia_nim":
                 provider = NvidiaNimProvider(cfg)
             elif cfg.name == "ollama":
                 provider = OllamaProvider(cfg)
+            elif cfg.name == "vllm":
+                provider = VLLMProvider(cfg)
             else:
                 continue
 
@@ -27,6 +38,7 @@ class ProviderManager:
             self.provider_order.append(cfg.name)
 
         self._check_availability()
+        self._init_ensemble()
 
     def _check_availability(self):
         """Check which providers are available"""
@@ -38,10 +50,80 @@ class ProviderManager:
                 print(f"  ✗ {name} unavailable")
                 self.unavailable_providers.add(name)
 
+    def _init_ensemble(self):
+        """Initialize ensemble provider if both API and local are available"""
+        if not CONFIG.ensemble_enabled:
+            print("  ⚠ Ensemble disabled in config")
+            return
+
+        nvidia_cfg = next((c for c in CONFIG.providers if c and c.name == "nvidia_nim"), None)
+        ollama_cfg = next((c for c in CONFIG.providers if c and c.name == "ollama"), None)
+
+        if nvidia_cfg and nvidia_cfg.api_key and ollama_cfg:
+            self.ensemble = EnsembleProvider(
+                nvidia_api_key=nvidia_cfg.api_key,
+                nvidia_model=nvidia_cfg.model,
+                ollama_base_url=ollama_cfg.base_url,
+                ollama_model=ollama_cfg.model,
+                confidence_threshold=CONFIG.ensemble_confidence_threshold,
+                divergence_threshold=CONFIG.ensemble_divergence_threshold,
+                max_workers=CONFIG.ensemble_max_workers,
+            )
+            print("  ✓ Ensemble provider initialized (NVIDIA + Ollama)")
+        else:
+            print("  ⚠ Ensemble not available (need both NVIDIA and Ollama)")
+
     def get_available_providers(self) -> List[str]:
         return [p for p in self.provider_order if p not in self.unavailable_providers]
 
-    def chat(self, messages: list, tools: Optional[list] = None, stream: bool = False, preferred: Optional[str] = None) -> Generator[str, None, None]:
+    # FIX: Renamed from chat() to complete() to match agent.py usage
+    def complete(
+        self,
+        messages: list,
+        tools: Optional[list] = None,
+        stream: bool = False,
+        preferred: Optional[str] = None,
+        use_ensemble: bool = False,
+        task_type: str = "general",
+        temperature: float = 0.7,
+        max_tokens: int = 4096
+    ) -> Generator[str, None, None]:
+        """
+        Complete with provider selection.
+
+        Args:
+            messages: Chat messages
+            tools: Available tools
+            stream: Stream response
+            preferred: Preferred provider name
+            use_ensemble: Use parallel ensemble (NVIDIA + Ollama)
+            task_type: Task type for ensemble quality scoring
+            temperature: Generation temperature
+            max_tokens: Max tokens in response
+        """
+        # If ensemble requested and available — use it
+        if use_ensemble and self.ensemble:
+            self.current_provider_name = "ensemble"
+            yield from self.ensemble.chat(
+                messages,
+                task_type=task_type,
+                stream=stream,
+                preferred_provider=preferred
+            )
+            return
+
+        # Otherwise — standard failover
+        yield from self._failover_chat(messages, tools, stream, preferred, temperature, max_tokens)
+
+    def _failover_chat(
+        self,
+        messages: list,
+        tools: Optional[list] = None,
+        stream: bool = False,
+        preferred: Optional[str] = None,
+        temperature: float = 0.7,
+        max_tokens: int = 4096
+    ) -> Generator[str, None, None]:
         """Chat with automatic failover between providers"""
         providers_to_try = self.get_available_providers()
 
@@ -52,6 +134,7 @@ class ProviderManager:
 
         for provider_name in providers_to_try:
             provider = self.providers[provider_name]
+            self.current_provider_name = provider_name
             retries = 0
             max_retries = 2
 
@@ -60,7 +143,7 @@ class ProviderManager:
                     print(f"[Provider] Using {provider_name}...")
                     full_response = ""
 
-                    for chunk in provider.chat(messages, tools, stream):
+                    for chunk in provider.chat(messages, tools, stream, temperature, max_tokens):
                         full_response += chunk
                         yield chunk
 
@@ -87,3 +170,9 @@ class ProviderManager:
         # All providers failed
         error_msg = f"All providers failed. Last error: {last_error}" if last_error else "No providers available"
         yield f"[ERROR] {error_msg}"
+
+    def get_ensemble_status(self) -> Dict[str, Any]:
+        """Get ensemble status"""
+        if self.ensemble:
+            return self.ensemble.get_status()
+        return {"available": False, "reason": "Not initialized"}

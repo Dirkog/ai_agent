@@ -1,24 +1,29 @@
-"""OpenRouter provider implementation"""
+"""OpenRouter provider implementation
+v6 update: temperature/max_tokens params, complete() alias, proper api_key handling
+"""
 import json
 from typing import Generator, Optional, List, Dict, Any
 from .base import BaseProvider, ProviderError
 
+
 class OpenRouterProvider(BaseProvider):
-    def chat(self, messages: list, tools: Optional[list] = None, stream: bool = False) -> Generator[str, None, None]:
+    def chat(self, messages: list, tools: Optional[list] = None,
+             stream: bool = False, temperature: float = 0.7,
+             max_tokens: int = 4096) -> Generator[str, None, None]:
         url = f"{self.config.base_url}/chat/completions"
         headers = {
             "Authorization": f"Bearer {self.config.api_key}",
             "Content-Type": "application/json",
-            "HTTP-Referer": "https://ai-agent.local",
-            "X-Title": "AI Agent"
+            "HTTP-Referer": "https://github.com/Dirkog/ai_agent",
+            "X-Title": "AI Agent v6"
         }
 
         payload = {
             "model": self.config.model,
             "messages": messages,
             "stream": stream,
-            "temperature": 0.7,
-            "max_tokens": 4096
+            "temperature": temperature,
+            "max_tokens": max_tokens
         }
 
         if tools:
@@ -26,11 +31,13 @@ class OpenRouterProvider(BaseProvider):
             payload["tool_choice"] = "auto"
 
         if stream:
-            # For streaming, we use a different approach
-            response = self.client.post(url, headers=headers, json=payload, timeout=self.config.timeout)
+            response = self.client.post(url, headers=headers, json=payload,
+                                       timeout=getattr(self.config, 'timeout', 120))
             if response.status_code != 200:
                 self._parse_retry_after(response.text, dict(response.headers))
                 raise ProviderError(f"OpenRouter error: {response.text[:500]}")
+
+            response.raise_for_status()
 
             for line in response.iter_lines():
                 if line:
