@@ -1,0 +1,14 @@
+{% extends "partials/base.html" %}
+
+{% block content %}
+<!-- AI Agent v6 Web UI -->
+<!-- All content rendered dynamically by JS components -->
+<div id="app-root"></div>
+
+<script>
+  // Initialize app when DOM is ready
+  document.addEventListener('DOMContentLoaded', () => {
+    window.app = new AIAgentWebApp();
+  });
+</script>
+{% endblock %}

@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Agent v6</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/themes/dark.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/composer.css') }}">
+</head>
+<body>
+  {% block content %}{% endblock %}
+
+  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+  <script src="{{ url_for('static', filename='js/components/editor.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/components/sidebar.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/components/chat.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/components/statusbar.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/components/search.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/components/ensemble.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
