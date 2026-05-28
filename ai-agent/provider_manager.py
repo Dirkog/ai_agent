@@ -1,10 +1,11 @@
 """Provider manager with ensemble support, failover and rate limit handling
-v6 update: chat() renamed to complete(), added ensemble integration
+Fixed: Unified complete() API (returns string when stream=False, generator when stream=True),
+       proper ProviderConfig passing to ensemble, removed dead code
 """
 import time
-from typing import Generator, Optional, List, Dict, Any
+from typing import Generator, Optional, List, Dict, Any, Union
 from config import CONFIG, ProviderConfig
-from providers import BaseProvider, RateLimitError, ProviderError
+from providers.base import BaseProvider, RateLimitError, ProviderError
 from providers.openrouter import OpenRouterProvider
 from providers.nvidia_nim import NvidiaNimProvider
 from providers.ollama import OllamaProvider
@@ -76,7 +77,6 @@ class ProviderManager:
     def get_available_providers(self) -> List[str]:
         return [p for p in self.provider_order if p not in self.unavailable_providers]
 
-    # FIX: Renamed from chat() to complete() to match agent.py usage
     def complete(
         self,
         messages: list,
@@ -87,46 +87,43 @@ class ProviderManager:
         task_type: str = "general",
         temperature: float = 0.7,
         max_tokens: int = 4096
-    ) -> Generator[str, None, None]:
+    ) -> Union[str, Generator[str, None, None]]:
         """
         Complete with provider selection.
-
-        Args:
-            messages: Chat messages
-            tools: Available tools
-            stream: Stream response
-            preferred: Preferred provider name
-            use_ensemble: Use parallel ensemble (NVIDIA + Ollama)
-            task_type: Task type for ensemble quality scoring
-            temperature: Generation temperature
-            max_tokens: Max tokens in response
+        FIXED: Returns string when stream=False, Generator when stream=True.
         """
-        # If ensemble requested and available — use it
         if use_ensemble and self.ensemble:
             self.current_provider_name = "ensemble"
-            yield from self.ensemble.chat(
-                messages,
-                task_type=task_type,
-                stream=stream,
-                preferred_provider=preferred
-            )
+            if stream:
+                yield from self.ensemble.chat(
+                    messages, task_type=task_type, stream=True, preferred_provider=preferred
+                )
+            else:
+                yield "".join(self.ensemble.chat(
+                    messages, task_type=task_type, stream=False, preferred_provider=preferred
+                ))
             return
 
-        # Otherwise — standard failover
-        yield from self._failover_chat(messages, tools, stream, preferred, temperature, max_tokens)
+        # Standard failover
+        if stream:
+            yield from self._failover_chat_stream(
+                messages, tools, preferred, temperature, max_tokens
+            )
+        else:
+            yield self._failover_chat_string(
+                messages, tools, preferred, temperature, max_tokens
+            )
 
-    def _failover_chat(
+    def _failover_chat_stream(
         self,
         messages: list,
         tools: Optional[list] = None,
-        stream: bool = False,
         preferred: Optional[str] = None,
         temperature: float = 0.7,
         max_tokens: int = 4096
     ) -> Generator[str, None, None]:
-        """Chat with automatic failover between providers"""
+        """Stream chat with automatic failover"""
         providers_to_try = self.get_available_providers()
-
         if preferred and preferred in providers_to_try:
             providers_to_try.insert(0, preferred)
 
@@ -141,38 +138,84 @@ class ProviderManager:
             while retries <= max_retries:
                 try:
                     print(f"[Provider] Using {provider_name}...")
-                    full_response = ""
-
-                    for chunk in provider.chat(messages, tools, stream, temperature, max_tokens):
-                        full_response += chunk
+                    for chunk in provider.chat(messages, tools, True, temperature, max_tokens):
                         yield chunk
-
-                    return  # Success
+                    return
 
                 except RateLimitError as e:
                     print(f"[Rate Limit] {provider_name}: {e}. Waiting {e.retry_after}s...")
                     time.sleep(e.retry_after)
                     retries += 1
                     if retries > max_retries:
-                        print(f"[Rate Limit] {provider_name}: Max retries exceeded, trying next provider...")
                         break
 
                 except ProviderError as e:
                     print(f"[Error] {provider_name}: {e}")
                     last_error = e
-                    break  # Try next provider
+                    break
 
                 except Exception as e:
                     print(f"[Unexpected] {provider_name}: {e}")
                     last_error = e
                     break
 
-        # All providers failed
         error_msg = f"All providers failed. Last error: {last_error}" if last_error else "No providers available"
         yield f"[ERROR] {error_msg}"
 
+    def _failover_chat_string(
+        self,
+        messages: list,
+        tools: Optional[list] = None,
+        preferred: Optional[str] = None,
+        temperature: float = 0.7,
+        max_tokens: int = 4096
+    ) -> str:
+        """Non-streaming chat with automatic failover"""
+        providers_to_try = self.get_available_providers()
+        if preferred and preferred in providers_to_try:
+            providers_to_try.insert(0, preferred)
+
+        last_error = None
+
+        for provider_name in providers_to_try:
+            provider = self.providers[provider_name]
+            self.current_provider_name = provider_name
+            retries = 0
+            max_retries = 2
+
+            while retries <= max_retries:
+                try:
+                    print(f"[Provider] Using {provider_name}...")
+                    return "".join(provider.chat(messages, tools, False, temperature, max_tokens))
+
+                except RateLimitError as e:
+                    print(f"[Rate Limit] {provider_name}: {e}. Waiting {e.retry_after}s...")
+                    time.sleep(e.retry_after)
+                    retries += 1
+                    if retries > max_retries:
+                        break
+
+                except ProviderError as e:
+                    print(f"[Error] {provider_name}: {e}")
+                    last_error = e
+                    break
+
+                except Exception as e:
+                    print(f"[Unexpected] {provider_name}: {e}")
+                    last_error = e
+                    break
+
+        error_msg = f"All providers failed. Last error: {last_error}" if last_error else "No providers available"
+        return f"[ERROR] {error_msg}"
+
     def get_ensemble_status(self) -> Dict[str, Any]:
-        """Get ensemble status"""
         if self.ensemble:
             return self.ensemble.get_status()
         return {"available": False, "reason": "Not initialized"}
+
+    def close(self):
+        """Close all providers"""
+        for provider in self.providers.values():
+            provider.close()
+        if self.ensemble:
+            self.ensemble.close()

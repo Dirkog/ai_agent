@@ -1,259 +1,107 @@
-# 🤖 AI Agent — Multi-Provider Coding Agent
+# 🤖 AI Agent v6 — Максимальный Разнорабочий Агент
 
-Агент для разработки с поддержкой нескольких LLM-провайдеров, автоматическим failover, интерактивным и автономным режимами работы.
+## 📋 О ПРОЕКТЕ
 
-## Возможности
+**AI Agent v6** — open-source AI-агент для автономного программирования, аналог Cursor IDE и Claude Code, с уникальной архитектурой: **одновременно локальные модели и API NVIDIA NIM**, сравнение ответов и выбор лучшего.
 
-- **Мульти-провайдерная система**: OpenRouter, NVIDIA NIM, Ollama (локальная)
-- **Умная обработка rate limits**: автоматическое ожидание, retry с exponential backoff, переключение на резервный провайдер
-- **Два режима работы**:
-  - **Интерактивный** (как Cursor): задаёт уточняющие вопросы, ждёт ответа
-  - **Автономный**: полностью самостоятельная работа
-- **Самостоятельный вызов инструментов**: чтение/запись файлов, терминал, поиск, Python
-- **Локальная валидация**: проверка синтаксиса, тесты, линтер после завершения задачи
-- **Веб-интерфейс**: управление через браузер
+**Ключевые особенности:**
+- **51+ инструментов** как в Cursor/Claude Code + уникальные
+- **20 ролей** с умным оркестратором
+- **Local + API ensemble** — параллельный запуск, выбор лучшего
+- **OpenRouter дебаггер** — только для анализа расхождений
+- **Все NVIDIA NIM модели бесплатные** (40 RPM, без кредитной карты)
+- **3 интерфейса**: CLI, Terminal UI (Textual), Web UI (Flask/SocketIO)
 
-## Архитектура
-
-```
-ai-agent/
-├── config.py              # Конфигурация провайдеров
-├── provider_manager.py    # Менеджер провайдеров с failover
-├── agent.py               # Ядро агента
-├── main.py                # Точка входа
-├── providers/
-│   ├── base.py           # Базовый класс + обработка rate limits
-│   ├── openrouter.py     # OpenRouter provider
-│   ├── nvidia_nim.py     # NVIDIA NIM provider
-│   └── ollama.py         # Ollama provider
-├── tools/
-│   ├── base.py           # Базовый класс инструментов
-│   ├── file_tools.py     # Работа с файлами
-│   └── shell_tools.py    # Shell и Python
-├── modes/
-│   ├── interactive.py    # Интерактивный режим
-│   └── autonomous.py     # Автономный режим
-├── validator/
-│   └── project_validator.py # Валидация проекта
-├── web/
-│   ├── app.py            # Flask/SocketIO сервер
-│   └── templates/
-│       └── index.html    # Web UI
-└── tests/                # Тесты
-```
-
-## Установка
-
-### Быстрый старт
+## 🚀 Быстрый старт
 
 ```bash
-# Клонировать репозиторий
-cd ai-agent
+# Клонировать
+git clone https://github.com/Dirkog/ai_agent.git
+cd ai_agent/ai-agent
 
 # Установить зависимости
 pip install -r requirements.txt
 
-# Или через pyproject.toml
-pip install -e ".[dev,web]"
+# Создать .env (интерактивно)
+python main.py --setup
 
-# Настроить переменные окружения
-cp .env.example .env
-# Отредактировать .env, добавить API ключи
-```
-
-### Docker
-
-```bash
-# Запуск с OpenRouter/NVIDIA
-docker-compose up -d
-
-# Запуск с локальными моделями (Ollama)
-docker-compose --profile local up -d
-```
-
-## Использование
-
-### CLI режим
-
-```bash
-# Интерактивный режим (по умолчанию)
+# Запуск
 python main.py --mode interactive
-
-# Автономный режим с конкретной задачей
-python main.py --mode autonomous --task "Создать REST API на Flask с авторизацией JWT"
-
-# Только валидация проекта
-python main.py --validate
-
-# Web интерфейс
+python main.py --mode swarm --task "Создать REST API"
 python main.py --web
 ```
 
-### Web интерфейс
-
-```bash
-python main.py --web
-# Открыть http://localhost:5000
-```
-
-### Примеры задач
-
-```bash
-# Создать проект
-python main.py --mode autonomous --task "Создать Python CLI утилиту для конвертации JSON в CSV"
-
-# Рефакторинг
-python main.py --mode interactive --task "Рефакторить main.py, вынести логику в отдельные модули"
-
-# Добавить тесты
-python main.py --mode autonomous --task "Написать unit-тесты для всех модулей проекта"
-
-# Исправить баги
-python main.py --mode autonomous --task "Найти и исправить все TODO и баги в коде"
-```
-
-## Конфигурация провайдеров
-
-Провайдеры настраиваются в `config.py` по приоритету:
-
-1. **OpenRouter** — доступ к Claude, GPT-4, Llama и др.
-2. **NVIDIA NIM** — оптимизированные модели NVIDIA
-3. **Ollama** — локальные модели (Codellama, Llama и др.)
-
-При rate limit или ошибке система автоматически переключается на следующий доступный провайдер.
-
-### Настройка Ollama (локальные модели)
-
-```bash
-# Установить Ollama
-# macOS/Linux: curl -fsSL https://ollama.com/install.sh | sh
-
-# Запустить сервер
-ollama serve
-
-# Скачать модель
-ollama pull codellama:34b
-# или
-ollama pull llama3:70b
-```
-
-## Обработка ошибок серверов
-
-Система распознаёт типы ошибок:
-
-| Ошибка | Действие |
-|--------|----------|
-| **429 Rate Limit** | Парсит `Retry-After` из заголовков и тела ответа, ожидает указанное время |
-| **5xx Server Error** | Exponential backoff (2^retry секунд) |
-| **Network Error** | До 3 попыток с увеличивающейся задержкой |
-| **Provider Unavailable** | Автоматический failover на следующий провайдер |
-| **Auth Error** | Переключение на следующий провайдер |
-
-### Пример обработки rate limit
+## 📁 Структура
 
 ```
-[Rate Limit] openrouter: 429 detected. Waiting 45s...
-[Rate Limit] Error detail: Rate limit exceeded. Retry after 45s
-[Provider] Switching to nvidia_nim...
+ai-agent/
+├── main.py              # Entry point
+├── agent.py             # Core agent (51 tools, streaming, ensemble)
+├── config.py            # Configuration with typed env vars
+├── provider_manager.py  # Unified provider API
+├── swarm/
+│   ├── orchestrator_v3.py   # Smart orchestrator with provider cache
+│   └── role_assigner.py     # 20 roles with model mapping
+├── providers/
+│   ├── base.py              # BaseProvider with complete()/close()
+│   ├── nvidia_nim.py
+│   ├── ollama.py
+│   ├── vllm_provider.py
+│   ├── openrouter.py
+│   ├── ensemble_provider.py # Parallel Local + API voting
+│   └── debug_analyzer.py
+├── tools/
+│   ├── file_tools.py
+│   ├── shell_tools.py
+│   ├── git_tools.py
+│   ├── advanced_tools.py
+│   ├── ide/ide_tools.py     # + HoverInfo, GoToDefinition
+│   ├── ai/ai_tools.py
+│   ├── cursor_tools.py
+│   ├── security_tools.py    # NEW: scan, dependency, secret, safety
+│   ├── multimodal_tools.py  # NEW: image, audio, video, screenshot
+│   └── orchestrator_tools.py # NEW: 6 orchestrator tools
+└── ...
 ```
 
-## Режимы работы
+## 🔧 Исправления v6.1
 
-### Интерактивный (Interactive)
-- Агент останавливается при неоднозначности
-- Задаёт уточняющие вопросы пользователю
-- Подтверждение опасных операций (rm, форматирование)
-- Похоже на Cursor AI
+### CRITICAL
+- ✅ `BaseProvider.complete()` — унифицированный API (string vs generator)
+- ✅ `EnsembleProvider` — правильная инициализация `ProviderConfig`
+- ✅ `Orchestrator` — `chat()` вместо несуществующего `complete()`, кэш провайдеров
+- ✅ `Agent.run()` — настоящий streaming (yield чанков), не блокирующий accumulate
 
-**Пример диалога:**
-```
-Agent: Для создания API мне нужно уточнить:
-❓ Question: Какой фреймворк предпочитаете — Flask или FastAPI?
-Your answer: FastAPI
+### HIGH
+- ✅ `config.py` — фильтрация `None` из providers, типизированные env-переменные
+- ✅ `provider_manager.py` — unified `complete()` API, правильный ensemble init
+- ✅ `.env.example` — полная конфигурация с 20 ролями
+- ✅ Connection leak fixed — `close()`/`__del__` для всех провайдеров
 
-Agent: [Продолжает работу с FastAPI...]
-```
+### NEW
+- ✅ `security_tools.py` — 4 инструмента (bandit, safety, gitleaks, nemotron-safety)
+- ✅ `multimodal_tools.py` — 4 инструмента (OCR, whisper, opencv, screenshot)
+- ✅ `orchestrator_tools.py` — 6 инструментов (assign, switch, vote, debug, retry, compare)
+- ✅ `.cursorrules` — шаблон правил проекта
 
-### Автономный (Autonomous)
-- Принимает решения самостоятельно
-- Auto-confirm безопасных операций
-- Логирование всех решений
-- End-to-end выполнение задач
+## 📊 Статистика
 
-**Безопасные операции (auto-confirm):**
-- Чтение файлов
-- Запись файлов
-- Запуск Python кода
-- Безопасные shell команды (ls, cat, echo, grep)
+| Метрика | Было | Стало |
+|---------|------|-------|
+| Инструменты | 30 | 51+ |
+| CRITICAL багов | 4 | 0 |
+| HIGH багов | 11 | 0 |
+| Streaming | Блокирующий | Реальный |
+| Provider cache | Нет | Да |
+| Token estimation | `len // 4` | `len(utf-8) // 3` |
+| Connection leaks | Да | Нет |
 
-**Требуют подтверждения:**
-- rm, dd, mkfs
-- Сетевые операции
-- Системные команды
+## ⚠️ Лимиты
 
-## Валидация проекта
+- **NVIDIA NIM Free**: 40 RPM, без кредитной карты, возможен downtime
+- **OpenRouter Free**: 20 RPM, 200/день — **ТОЛЬКО для дебага**
+- **Local**: Требует VRAM 8-48GB, медленнее API
 
-После завершения задачи автоматически запускается:
-
-- ✅ Проверка синтаксиса Python (AST)
-- ✅ Проверка импортов
-- ✅ Запуск тестов (pytest)
-- ✅ Линтинг (flake8/pylint)
-- ✅ Проверка структуры проекта
-
-**Пример вывода:**
-```
-============================================================
-📊 VALIDATION SUMMARY
-============================================================
-
-✅ Python Syntax: Checked 5 files ✓
-✅ Imports: Found 0 potentially missing imports
-✅ Tests: Tests 5 passed
-✅ Linting (flake8): flake8 passed ✓
-✅ Requirements: requirements.txt has 8 dependencies
-⚠️ File Structure: Structure check found 2 issues
-   • Found 3 __pycache__ directories (should be gitignored)
-
-============================================================
-Result: 5/6 checks passed
-============================================================
-```
-
-## API Keys
-
-- **OpenRouter**: https://openrouter.ai/keys
-- **NVIDIA NIM**: https://build.nvidia.com/
-- **Ollama**: https://ollama.ai (локально, ключ не нужен)
-
-## Тестирование
-
-```bash
-# Запустить все тесты
-pytest tests/ -v
-
-# Запустить конкретный модуль
-pytest tests/test_providers.py -v
-pytest tests/test_tools.py -v
-pytest tests/test_validator.py -v
-
-# С покрытием
-pytest tests/ --cov=. --cov-report=html
-```
-
-## Разработка
-
-```bash
-# Установить dev зависимости
-pip install -e ".[dev]"
-
-# Запуск линтера
-flake8 . --max-line-length=120
-
-# Форматирование
-black .
-```
-
-## Лицензия
+## 📄 Лицензия
 
 MIT

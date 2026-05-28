@@ -1,10 +1,14 @@
-"""Base provider with rate limiting and error handling"""
+"""Base provider with rate limiting, error handling, and unified API
+v6 fix: Added complete() method, close() for httpx.Client, HTTP-date parsing
+"""
 import time
 import re
 import json
 from abc import ABC, abstractmethod
 from typing import Generator, Dict, Any, Optional
 import httpx
+from email.utils import parsedate_to_datetime
+from datetime import datetime, timezone
 
 class RateLimitError(Exception):
     def __init__(self, message: str, retry_after: int = 60):
@@ -20,6 +24,22 @@ class BaseProvider(ABC):
         self.last_request_time = 0
         self.request_count = 0
         self.client = httpx.Client(timeout=config.timeout)
+        self._closed = False
+
+    def close(self):
+        """Close httpx client to prevent connection leaks"""
+        if not self._closed:
+            self.client.close()
+            self._closed = True
+
+    def __del__(self):
+        self.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
 
     def _check_rate_limit(self):
         """Simple rate limit tracking"""
@@ -33,19 +53,25 @@ class BaseProvider(ABC):
             if sleep_time > 0:
                 print(f"[Rate Limit] Self-limiting: waiting {sleep_time:.1f}s")
                 time.sleep(sleep_time)
-                self.request_count = 0
-                self.last_request_time = time.time()
+            self.request_count = 0
+            self.last_request_time = time.time()
 
     def _parse_retry_after(self, error_text: str, headers: Dict) -> int:
-        """Extract retry time from error message or headers"""
-        # Check headers first
+        """Extract retry time from error message or headers (supports HTTP-date)"""
         retry_after = headers.get("retry-after") or headers.get("Retry-After")
         if retry_after:
             try:
+                # Try integer seconds first
                 return int(retry_after)
             except ValueError:
-                # Could be HTTP date, ignore for simplicity
-                pass
+                # Try HTTP-date format
+                try:
+                    retry_dt = parsedate_to_datetime(retry_after)
+                    now = datetime.now(timezone.utc)
+                    delta = (retry_dt - now).total_seconds()
+                    return max(1, int(delta))
+                except Exception:
+                    pass
 
         # Parse from error text
         patterns = [
@@ -116,8 +142,18 @@ class BaseProvider(ABC):
         raise ProviderError("Max retries exceeded")
 
     @abstractmethod
-    def chat(self, messages: list, tools: Optional[list] = None, stream: bool = False) -> Generator[str, None, None]:
+    def chat(self, messages: list, tools: Optional[list] = None, stream: bool = False,
+             temperature: float = 0.7, max_tokens: int = 4096) -> Generator[str, None, None]:
+        """Stream chat completion. Must yield string chunks."""
         pass
+
+    def complete(self, messages: list, tools: Optional[list] = None,
+                 temperature: float = 0.7, max_tokens: int = 4096) -> str:
+        """Non-streaming completion — returns full response string.
+        FIX: Added unified complete() method that collects from chat().
+        """
+        return "".join(self.chat(messages, tools, stream=False,
+                                  temperature=temperature, max_tokens=max_tokens))
 
     @abstractmethod
     def is_available(self) -> bool:

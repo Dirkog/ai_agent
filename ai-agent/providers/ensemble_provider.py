@@ -1,6 +1,5 @@
 """Ensemble Provider — параллельный запуск Local + API + голосование
-Ключевая фича v6: одновременно запускает NVIDIA NIM API и Ollama/vLLM,
-сравнивает ответы и выбирает лучший (или объединяет).
+Fixed: Proper ProviderConfig initialization, ordered merge, exact pattern matching
 """
 import time
 import json
@@ -13,7 +12,7 @@ from pathlib import Path
 from providers.base import BaseProvider, ProviderError
 from providers.nvidia_nim import NvidiaNimProvider
 from providers.ollama import OllamaProvider
-
+from config import ProviderConfig
 
 @dataclass
 class EnsembleResult:
@@ -25,7 +24,6 @@ class EnsembleResult:
     tokens_used: int
     quality_score: float = 0.0
     error: Optional[str] = None
-
 
 @dataclass
 class VoteResult:
@@ -55,48 +53,48 @@ class QualityScorer:
         else:
             scores.append(0.0)
 
-        # 2. Структурированность (наличие markdown, списков, блоков кода)
+        # 2. Структурированность
         structure_score = 0.0
         if "```" in response:
             structure_score += 0.3
-        if any(c in response for c in ["#", "##", "###"]):
+        if any(c in response for c in ["# ", "## ", "### "]):
             structure_score += 0.2
         if "|" in response and "---" in response:
             structure_score += 0.2
-        if "- " in response or "1. " in response:
+        if "- " in response or re.search(r"^\d+\. ", response, re.MULTILINE):
             structure_score += 0.2
         scores.append(min(structure_score, 1.0))
 
-        # 3. Code quality (если есть код)
+        # 3. Code quality
         if "```" in response:
-            code_blocks = response.split("```")
             code_score = 0.0
-            for block in code_blocks[1::2]:  # только содержимое блоков
+            code_blocks = response.split("```")
+            for block in code_blocks[1::2]:
                 lines = block.strip().split("\n")
                 if len(lines) > 3:
                     code_score += 0.3
-                if "def " in block or "class " in block:
+                if re.search(r"\b(def|class)\b", block):
                     code_score += 0.2
-                if "import " in block or "from " in block:
+                if re.search(r"\b(import|from)\b", block):
                     code_score += 0.1
             scores.append(min(code_score, 1.0))
         else:
             scores.append(0.5)
 
-        # 4. Completeness (наличие заключения, summary)
+        # 4. Completeness
         if any(w in response.lower()[-500:] for w in ["summary", "итог", "conclusion", "result", "output"]):
             scores.append(0.9)
         else:
             scores.append(0.5)
 
-        # 5. Task-specific scoring
+        # 5. Task-specific scoring (FIXED: exact word boundaries)
         if task_type == "coding":
-            if "test" in response.lower() or "pytest" in response.lower():
+            if re.search(r"\b(test|pytest|unittest|assert)\b", response.lower()):
                 scores.append(0.9)
             else:
                 scores.append(0.5)
         elif task_type == "debugging":
-            if "error" in response.lower() or "bug" in response.lower() or "fix" in response.lower():
+            if re.search(r"\b(error|bug|fix|issue|exception)\b", response.lower()):
                 scores.append(0.9)
             else:
                 scores.append(0.5)
@@ -115,7 +113,7 @@ class EnsembleProvider:
     def __init__(
         self,
         nvidia_api_key: str,
-        nvidia_model: str = "nvidia/llama-3.1-nemotron-70b-instruct",
+        nvidia_model: str = "mistralai/mistral-large-3-675b-instruct-2512",
         ollama_base_url: str = "http://localhost:11434/v1",
         ollama_model: str = "codellama:34b",
         vllm_base_url: Optional[str] = None,
@@ -124,20 +122,48 @@ class EnsembleProvider:
         confidence_threshold: float = 0.7,
         divergence_threshold: float = 0.3,
     ):
-        self.nvidia = NvidiaNimProvider(
+        # FIX: Create proper ProviderConfig for each provider
+        nvidia_cfg = ProviderConfig(
+            name="nvidia_nim",
+            base_url="https://integrate.api.nvidia.com/v1",
             api_key=nvidia_api_key,
-            model=nvidia_model
+            model=nvidia_model,
+            priority=1,
+            rate_limit_rpm=40,
+            is_free=True,
+            timeout=120,
+            max_retries=3
         )
-        self.ollama = OllamaProvider(
+        self.nvidia = NvidiaNimProvider(nvidia_cfg)
+
+        ollama_cfg = ProviderConfig(
+            name="ollama",
             base_url=ollama_base_url,
-            model=ollama_model
+            api_key=None,
+            model=ollama_model,
+            priority=3,
+            rate_limit_rpm=9999,
+            is_free=True,
+            timeout=300,
+            max_retries=1
         )
+        self.ollama = OllamaProvider(ollama_cfg)
+
         self.vllm = None
         if vllm_base_url and vllm_model:
-            # vLLM provider будет создан при необходимости
-            self.vllm_config = {"base_url": vllm_base_url, "model": vllm_model}
-        else:
-            self.vllm_config = None
+            vllm_cfg = ProviderConfig(
+                name="vllm",
+                base_url=vllm_base_url,
+                api_key=None,
+                model=vllm_model,
+                priority=4,
+                rate_limit_rpm=9999,
+                is_free=True,
+                timeout=300,
+                max_retries=1
+            )
+            from providers.vllm_provider import VLLMProvider
+            self.vllm = VLLMProvider(vllm_cfg)
 
         self.max_workers = max_workers
         self.confidence_threshold = confidence_threshold
@@ -155,7 +181,8 @@ class EnsembleProvider:
         start = time.time()
         try:
             response = ""
-            for chunk in provider.chat(messages, stream=False):
+            # FIX: Always stream=True, collect chunks
+            for chunk in provider.chat(messages, stream=True):
                 response += chunk
 
             latency = (time.time() - start) * 1000
@@ -183,15 +210,11 @@ class EnsembleProvider:
 
     def _compare_responses(self, results: List[EnsembleResult]) -> VoteResult:
         """
-        Сравнивает ответы и принимает решение:
-        - Если один явно лучше → берём его
-        - Если похожие → merge
-        - Если сильно разные → flag divergence
+        Сравнивает ответы и принимает решение.
         """
         valid_results = [r for r in results if r.error is None and r.response]
 
         if not valid_results:
-            # Все упали — вернуть ошибку
             return VoteResult(
                 winner=results[0] if results else EnsembleResult("none", "", "", 0, 0),
                 all_results=results,
@@ -206,22 +229,19 @@ class EnsembleProvider:
                 confidence=1.0
             )
 
-        # Score по quality + latency (быстрее = лучше, но с весом)
+        # Score по quality + latency
         for r in valid_results:
-            latency_bonus = max(0, 1.0 - (r.latency_ms / 30000)) * 0.1  # 30s max
+            latency_bonus = max(0, 1.0 - (r.latency_ms / 30000)) * 0.1
             r.quality_score = min(1.0, r.quality_score + latency_bonus)
 
-        # Сортируем по quality score
         valid_results.sort(key=lambda x: x.quality_score, reverse=True)
         winner = valid_results[0]
         runner_up = valid_results[1] if len(valid_results) > 1 else None
 
-        # Проверяем divergence
         if runner_up:
             score_diff = winner.quality_score - runner_up.quality_score
 
             if score_diff > self.divergence_threshold:
-                # Победитель явно лучше
                 return VoteResult(
                     winner=winner,
                     all_results=results,
@@ -229,7 +249,6 @@ class EnsembleProvider:
                     divergence_reason=f"Clear winner: {winner.provider_name} ({winner.quality_score:.2f} vs {runner_up.quality_score:.2f})"
                 )
             else:
-                # Разница маленькая — попробуем merge
                 merged = self._merge_responses(winner.response, runner_up.response)
                 return VoteResult(
                     winner=winner,
@@ -247,8 +266,7 @@ class EnsembleProvider:
         )
 
     def _merge_responses(self, response_a: str, response_b: str) -> str:
-        """Умное объединение двух ответов"""
-        # Простая стратегия: берём более длинный/структурированный
+        """Умное объединение двух ответов (FIXED: preserves order)"""
         score_a = self.scorer.score(response_a)
         score_b = self.scorer.score(response_b)
 
@@ -257,11 +275,14 @@ class EnsembleProvider:
         elif score_b > score_a + 0.2:
             return response_b
 
-        # Если похожие — объединяем уникальные части
-        lines_a = set(response_a.split("\n"))
-        lines_b = set(response_b.split("\n"))
+        # FIX: Preserve line order using seen set
+        seen = set(response_a.split("\n"))
+        unique_b = []
+        for line in response_b.split("\n"):
+            if line not in seen:
+                unique_b.append(line)
+                seen.add(line)
 
-        unique_b = lines_b - lines_a
         if unique_b:
             return response_a + "\n\n# Additional insights from second model:\n" + "\n".join(unique_b)
 
@@ -274,34 +295,30 @@ class EnsembleProvider:
         stream: bool = False,
         preferred_provider: Optional[str] = None
     ) -> Generator[str, None, None]:
-        """
-        Главный метод ансамбля.
-        Параллельно запускает все доступные провайдеры.
-        """
+        """Главный метод ансамбля."""
         providers_to_run = []
 
-        # Проверяем доступность
         if self.nvidia.is_available():
             providers_to_run.append(("nvidia_nim", self.nvidia))
         if self.ollama.is_available():
             providers_to_run.append(("ollama", self.ollama))
+        if self.vllm and self.vllm.is_available():
+            providers_to_run.append(("vllm", self.vllm))
 
         if not providers_to_run:
             yield "[ERROR] No providers available for ensemble"
             return
 
-        # Если preferred_provider указан и доступен — используем только его
         if preferred_provider:
-            for name, prov in providers_to_run:
-                if name == preferred_provider:
-                    providers_to_run = [(name, prov)]
-                    break
+            providers_to_run = [(n, p) for n, p in providers_to_run if n == preferred_provider]
+            if not providers_to_run:
+                yield "[ERROR] Preferred provider not available"
+                return
 
         yield f"🔄 Ensemble: запускаю {len(providers_to_run)} провайдеров параллельно...\n"
 
         results = []
 
-        # Параллельный запуск
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             futures = {
                 executor.submit(
@@ -322,7 +339,7 @@ class EnsembleProvider:
                     status = "✅" if result.error is None else "❌"
                     yield f"{status} {provider_name} ({result.model_id}): {result.latency_ms:.0f}ms, quality={result.quality_score:.2f}\n"
                     if result.error:
-                        yield f"   Error: {result.error[:200]}\n"
+                        yield f" Error: {result.error[:200]}\n"
                 except Exception as e:
                     yield f"❌ {provider_name}: Timeout/Exception — {str(e)[:200]}\n"
                     results.append(EnsembleResult(
@@ -340,9 +357,9 @@ class EnsembleProvider:
         yield f"\n📊 Ensemble Vote Results:\n"
         for r in vote.all_results:
             if r.error:
-                yield f"  ❌ {r.provider_name}: ERROR\n"
+                yield f" ❌ {r.provider_name}: ERROR\n"
             else:
-                yield f"  {'🏆' if r == vote.winner else '  '} {r.provider_name}: score={r.quality_score:.2f} | {r.latency_ms:.0f}ms\n"
+                yield f" {'🏆' if r == vote.winner else '  '} {r.provider_name}: score={r.quality_score:.2f} | {r.latency_ms:.0f}ms\n"
 
         yield f"\n🎯 Winner: {vote.winner.provider_name} ({vote.winner.model_id})\n"
         yield f"📈 Confidence: {vote.confidence:.2f}\n"
@@ -355,7 +372,6 @@ class EnsembleProvider:
         else:
             final_response = vote.winner.response
 
-        # Возвращаем финальный ответ
         if stream:
             for chunk in self._stream_response(final_response):
                 yield chunk
@@ -376,8 +392,16 @@ class EnsembleProvider:
             "nvidia_model": getattr(self.nvidia, 'model', 'unknown'),
             "ollama_available": self.ollama.is_available(),
             "ollama_model": getattr(self.ollama, 'model', 'unknown'),
-            "vllm_configured": self.vllm_config is not None,
+            "vllm_available": self.vllm.is_available() if self.vllm else False,
+            "vllm_model": getattr(self.vllm, 'model', None) if self.vllm else None,
             "max_workers": self.max_workers,
             "confidence_threshold": self.confidence_threshold,
             "divergence_threshold": self.divergence_threshold,
         }
+
+    def close(self):
+        """Close all providers to prevent connection leaks"""
+        self.nvidia.close()
+        self.ollama.close()
+        if self.vllm:
+            self.vllm.close()

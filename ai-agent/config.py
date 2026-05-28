@@ -1,5 +1,5 @@
 """AI Agent Configuration — v6 with Ensemble, Roles, and vLLM support
-Fixed: Added timeout, max_retries, vllm_config to ProviderConfig
+Fixed: Filter None from providers, correct Ollama URL, typed env vars
 """
 import os
 from dataclasses import dataclass, field
@@ -17,72 +17,117 @@ class ProviderConfig:
     priority: int
     rate_limit_rpm: int
     is_free: bool = True
-    timeout: int = 120           # FIX: Added for BaseProvider
-    max_retries: int = 3          # FIX: Added for BaseProvider._make_request
-    vllm_config: Optional[Dict] = None  # NEW: For vLLM provider
+    timeout: int = 120
+    max_retries: int = 3
+    vllm_config: Optional[Dict] = None
 
 @dataclass
 class AgentConfig:
-    max_iterations: int = 50
+    max_iterations: int = int(os.getenv("MAX_ITERATIONS", "50"))
     working_directory: str = field(default_factory=lambda: os.getenv("WORKING_DIRECTORY", "."))
-    auto_validate: bool = True
-    auto_checkpoint: bool = True
-    context_window: int = 200000
+    auto_validate: bool = os.getenv("AUTO_VALIDATE", "true").lower() == "true"
+    auto_checkpoint: bool = os.getenv("AUTO_CHECKPOINT", "true").lower() == "true"
+    context_window: int = int(os.getenv("CONTEXT_WINDOW", "200000"))
 
     # Orchestrator settings
-    orchestrator_brain: str = "nvidia/llama-3.1-nemotron-70b-instruct"
-    debugger_model: str = "anthropic/claude-3.5-sonnet"
+    orchestrator_brain: str = os.getenv("NVIDIA_ORCHESTRATOR_MODEL", "mistralai/mistral-large-3-675b-instruct-2512")
+    debugger_model: str = os.getenv("DEBUG_MODEL", "deepseek/deepseek-v4-pro:free")
     default_rpm_limit: int = 40
 
-    # Ensemble settings (NEW)
-    ensemble_enabled: bool = True
-    ensemble_confidence_threshold: float = 0.7
-    ensemble_divergence_threshold: float = 0.3
-    ensemble_max_workers: int = 4
+    # Ensemble settings
+    ensemble_enabled: bool = os.getenv("ENSEMBLE_ENABLED", "true").lower() == "true"
+    ensemble_confidence_threshold: float = float(os.getenv("ENSEMBLE_CONFIDENCE_THRESHOLD", "0.7"))
+    ensemble_divergence_threshold: float = float(os.getenv("ENSEMBLE_DIVERGENCE_THRESHOLD", "0.3"))
+    ensemble_max_workers: int = int(os.getenv("ENSEMBLE_MAX_WORKERS", "4"))
 
-    # Role assigner settings (NEW)
-    available_vram_gb: int = field(default_factory=lambda: int(os.getenv("AVAILABLE_VRAM_GB", "48")))
-    prefer_local_models: bool = True
+    # Role assigner settings
+    available_vram_gb: int = int(os.getenv("AVAILABLE_VRAM_GB", "48"))
+    prefer_local_models: bool = os.getenv("PREFER_LOCAL_MODELS", "true").lower() == "true"
 
-    # Providers
-    providers: List[ProviderConfig] = field(default_factory=lambda: [
-        ProviderConfig(
+    # Providers — filter out None entries
+    providers: List[ProviderConfig] = field(default_factory=lambda: _build_providers())
+
+    # Security levels
+    security_levels: Dict[str, str] = field(default_factory=lambda: {
+        "read_file": "low",
+        "write_file": "medium",
+        "execute_command": "high",
+        "git_rollback": "critical",
+    })
+
+    # LSP
+    lsp_command: str = os.getenv("LSP_COMMAND", "pylsp")
+
+    # Vector store
+    vector_db_path: str = ".ai-agent/vector_db"
+
+    # Session memory
+    memory_path: str = ".ai-agent/memory"
+
+    # Debug analyzer settings
+    debug_analyzer_model: str = os.getenv("DEBUG_MODEL", "deepseek/deepseek-v4-pro:free")
+    debug_analyzer_enabled: bool = os.getenv("DEBUG_ANALYZER_ENABLED", "true").lower() == "true"
+
+    # Flask settings (typed)
+    flask_port: int = int(os.getenv("FLASK_PORT", "5000"))
+    flask_debug: bool = os.getenv("FLASK_DEBUG", "false").lower() == "true"
+
+
+def _build_providers() -> List[ProviderConfig]:
+    """Build provider list, filtering out None/unconfigured entries."""
+    providers = []
+
+    # NVIDIA NIM
+    nvidia_key = os.getenv("NVIDIA_API_KEY")
+    if nvidia_key:
+        providers.append(ProviderConfig(
             name="nvidia_nim",
-            base_url="https://integrate.api.nvidia.com/v1",
-            api_key=os.getenv("NVIDIA_API_KEY"),
-            model=os.getenv("NVIDIA_MODEL", "nvidia/llama-3.1-nemotron-70b-instruct"),
+            base_url=os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1"),
+            api_key=nvidia_key,
+            model=os.getenv("NVIDIA_MODEL", "mistralai/mistral-large-3-675b-instruct-2512"),
             priority=1,
             rate_limit_rpm=40,
             is_free=True,
             timeout=120,
             max_retries=3
-        ),
-        ProviderConfig(
+        ))
+
+    # OpenRouter
+    or_key = os.getenv("OPENROUTER_API_KEY")
+    if or_key:
+        providers.append(ProviderConfig(
             name="openrouter",
-            base_url="https://openrouter.ai/api/v1",
-            api_key=os.getenv("OPENROUTER_API_KEY"),
-            model=os.getenv("OPENROUTER_MODEL", "anthropic/claude-3.5-sonnet"),
+            base_url=os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+            api_key=or_key,
+            model=os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-v4-pro:free"),
             priority=2,
             rate_limit_rpm=20,
             is_free=False,
             timeout=120,
             max_retries=3
-        ),
-        ProviderConfig(
+        ))
+
+    # Ollama — use OpenAI-compatible endpoint
+    ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+    if ollama_url:
+        providers.append(ProviderConfig(
             name="ollama",
-            base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
-            api_key=None,  # FIX: Ollama doesn't need API key
+            base_url=ollama_url,
+            api_key=None,
             model=os.getenv("OLLAMA_MODEL", "codellama:34b"),
             priority=3,
             rate_limit_rpm=9999,
             is_free=True,
             timeout=300,
             max_retries=1
-        ),
-        # NEW: vLLM provider config
-        ProviderConfig(
+        ))
+
+    # vLLM
+    vllm_url = os.getenv("VLLM_BASE_URL")
+    if vllm_url:
+        providers.append(ProviderConfig(
             name="vllm",
-            base_url=os.getenv("VLLM_BASE_URL", "http://localhost:8000/v1"),
+            base_url=vllm_url,
             api_key=None,
             model=os.getenv("VLLM_MODEL", ""),
             priority=4,
@@ -94,29 +139,10 @@ class AgentConfig:
                 "tensor_parallel_size": int(os.getenv("VLLM_TP_SIZE", "1")),
                 "quantization": os.getenv("VLLM_QUANTIZATION", None),
             }
-        ) if os.getenv("VLLM_BASE_URL") else None,
-    ])
+        ))
 
-    # Security levels
-    security_levels: Dict[str, str] = field(default_factory=lambda: {
-        "read_file": "low",
-        "write_file": "medium",
-        "execute_command": "high",
-        "git_rollback": "critical",
-    })
+    return providers
 
-    # LSP
-    lsp_command: str = "pylsp"
-
-    # Vector store
-    vector_db_path: str = ".ai-agent/vector_db"
-
-    # Session memory
-    memory_path: str = ".ai-agent/memory"
-
-    # NEW: Debug analyzer settings
-    debug_analyzer_model: str = "deepseek/deepseek-r1:free"
-    debug_analyzer_enabled: bool = True
 
 # Global config instance
 CONFIG = AgentConfig()
